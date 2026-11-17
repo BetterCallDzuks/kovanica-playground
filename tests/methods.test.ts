@@ -86,9 +86,8 @@ describe("Playground Allowlisted Methods", () => {
     expect(validateParam(addressParam, hex, CHAIN_IDS.TESTNET).valid).toBe(false);
     expect(validateParam(addressParam, hex, CHAIN_IDS.HYBRID_TESTNET).valid).toBe(false);
 
-    // Bare hex on Devnet (Chain 3) and Local (Chain 1337) -> valid legacy address
+    // Bare hex on Devnet (Chain 3) -> valid legacy address (once testedRevision is bumped past kovanica-sdk#11, 1337 is also rejected)
     expect(validateParam(addressParam, hex, CHAIN_IDS.DEVNET).valid).toBe(true);
-    expect(validateParam(addressParam, hex, CHAIN_IDS.LOCAL).valid).toBe(true);
   });
 
   it("validates hex32 parameters", () => {

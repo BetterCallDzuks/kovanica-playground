@@ -507,7 +507,6 @@ export default function App() {
                 <option value={CHAIN_IDS.MAINNET}>Mainnet (Chain 1)</option>
                 <option value={CHAIN_IDS.TESTNET}>Testnet (Chain 2)</option>
                 <option value={CHAIN_IDS.DEVNET}>Devnet (Chain 3)</option>
-                <option value={CHAIN_IDS.LOCAL}>Local Devnet (Chain 1337)</option>
               </select>
             </div>
 
@@ -934,7 +933,7 @@ export default function App() {
                 <div className="bg-surface-2/60 p-4 rounded-lg border border-border/60 text-xs text-muted text-center">
                   <p>PoW Mining info is available on Hybrid PoW + GHOSTDAG networks: Mainnet (Chain 1) and Testnet (Chain 2).</p>
                   <p className="mt-1 text-[11px] text-subtle">
-                    Devnet (Chain 3) and Local Devnet (Chain 1337) use development parameter profiles.
+                    Devnet (Chain 3) uses a development parameter profile (also for local testing).
                   </p>
                 </div>
               )}
