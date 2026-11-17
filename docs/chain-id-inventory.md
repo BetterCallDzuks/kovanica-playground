@@ -82,3 +82,11 @@
   - `isLegacyAddressAllowed(chainId)` returns `true` only for `DEVNET (3)`. It returns `false` for `MAINNET (1)`, `TESTNET (2)`, and all retired/unknown chain IDs.
 - **`src/address.ts`:**
   - `isValidAddress(address, chainId)` and `parseAddressForChain(address, chainId)` delegate legacy fallback permission to `isLegacyAddressAllowed(chainId)` and enforce lowercase `0x` prefix on legacy hex strings.
+
+---
+
+## 5. Native Full-Node Packaging & RPC Conventions
+
+- **Dual-ABI native full node:** the Android native full node (`kovanica-node`, packaged as `libkovanica_node.so`) and its FFI libraries (`libkovanica_ffi.so`, `libkovanica_light_ffi.so`) are built for **both** Android ABIs `arm64-v8a` and `x86_64`. `kovanica-apps/android-node` sets Gradle `abiFilters` to `["arm64-v8a", "x86_64"]`, and its unit tests verify the JNI symbols in each ABI.
+- **RPC port convention:** the on-device native full node listens on `rpc_addr = 127.0.0.1` and `rpc_port = 8545` (the default). The Playground's live-readiness helper and tests default to the local node at `http://127.0.0.1:8545/rpc`.
+- **Chain 2 is read-only here:** testnet chain `2` (official frozen tag `2-acfdf6a6c80fd28a`) is consumed from the node; no chain-2 genesis/config file is modified by this inventory and live `seed1` is not redeployed.
