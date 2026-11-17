@@ -248,7 +248,7 @@ export const ALLOWLISTED_METHODS: MethodDefinition[] = [
   {
     method: "kovanica_getValidators",
     category: "Staking",
-    description: "Returns all registered validators, active status, and bonded stakes.",
+    description: "Returns all registered validators, active status, and bonded stakes. Legacy (Mysticeti) chains 3 & 1337 only; hybrid chains 1 & 2 reject with -32600 (L1 #272).",
     params: [],
     execute: async (client, _params, options) => {
       return client.getValidators(options);
@@ -257,7 +257,7 @@ export const ALLOWLISTED_METHODS: MethodDefinition[] = [
   {
     method: "kovanica_getStake",
     category: "Staking",
-    description: "Returns the bonded validator stake for a specific address in atoms and KVNC.",
+    description: "Returns the bonded validator stake for a specific address in atoms and KVNC. Legacy (Mysticeti) chains 3 & 1337 only; hybrid chains 1 & 2 reject with -32600 (L1 #272).",
     params: [
       {
         name: "address",
@@ -301,7 +301,7 @@ export const ALLOWLISTED_METHODS: MethodDefinition[] = [
   {
     method: "kovanica_getLeaderSchedule",
     category: "Staking",
-    description: "Returns upcoming leader slots schedule.",
+    description: "Returns upcoming leader slots schedule. Legacy (Mysticeti) chains 3 & 1337 only; hybrid chains 1 & 2 reject with -32600 (L1 #272).",
     params: [
       {
         name: "count",

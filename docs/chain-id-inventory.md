@@ -8,12 +8,12 @@
 
 ## 1. Canonical Chain-ID Matrix
 
-| Chain ID | Constant (`CHAIN_IDS`) | Network Name | Consensus Engine | Legacy Hex Address Policy | Mining RPC (`getMiningInfo` / `getDagTips`) | Primary Role |
-|---:|---|---|---|---|---|---|
-| `1` | `MAINNET` | Mainnet | Hybrid PoW + GHOSTDAG (`K = 5`, target `4000 ms`, KovanicaHash, no stake in consensus) | **Rejected** (Strict PRO-21 base32 `kvnc...dag` only) | **Supported** (`kovanica_getMiningInfo`, `kovanica_getDagTips`) | Production Mainnet |
-| `2` | `TESTNET` / `HYBRID_TESTNET` | Testnet | Hybrid PoW + GHOSTDAG (`K = 5`, target `4000 ms`, KovanicaHash, no stake in consensus, ADR 0003) | **Rejected** (Strict PRO-21 base32 `kvnc...dag` only) | **Supported** (`kovanica_getMiningInfo`, `kovanica_getDagTips`) | Public Hybrid PoW Testnet |
-| `3` | `DEVNET` | Devnet | Mysticeti (development parameter profile) | Allowed (`0x<64-hex>`, `<64-hex>`, `kvnc<72-hex>dag`) | Unsupported (`-32601` / `-32600`) | Ephemeral Devnet |
-| `1337` | `LOCAL` | Local Devnet | Mysticeti (development parameter profile) | Allowed (`0x<64-hex>`, `<64-hex>`, `kvnc<72-hex>dag`) | Unsupported (`-32601` / `-32600`) | Local single-node / cluster testing |
+| Chain ID | Constant (`CHAIN_IDS`) | Network Name | Consensus Engine | Legacy Hex Address Policy | Mining RPC (`getMiningInfo` / `getDagTips`) | Legacy Staking RPC (`getValidators` / `getStake` / `getLeaderSchedule`) | Primary Role |
+|---:|---|---|---|---|---|---|---|
+| `1` | `MAINNET` | Mainnet | Hybrid PoW + GHOSTDAG (`K = 5`, target `4000 ms`, KovanicaHash, no stake in consensus) | **Rejected** (Strict PRO-21 base32 `kvnc...dag` only) | **Supported** (`kovanica_getMiningInfo`, `kovanica_getDagTips`) | **Rejected** with `-32600` (`InvalidRequest`) — no validator set, no stake, no committee schedule (L1 #272) | Production Mainnet |
+| `2` | `TESTNET` / `HYBRID_TESTNET` | Testnet | Hybrid PoW + GHOSTDAG (`K = 5`, target `4000 ms`, KovanicaHash, no stake in consensus, ADR 0003) | **Rejected** (Strict PRO-21 base32 `kvnc...dag` only) | **Supported** (`kovanica_getMiningInfo`, `kovanica_getDagTips`) | **Rejected** with `-32600` (`InvalidRequest`) — no validator set, no stake, no committee schedule (L1 #272) | Public Hybrid PoW Testnet |
+| `3` | `DEVNET` | Devnet | Mysticeti (development parameter profile) | Allowed (`0x<64-hex>`, `<64-hex>`, `kvnc<72-hex>dag`) | Unsupported (`-32601` / `-32600`) | **Supported** | Ephemeral Devnet |
+| `1337` | `LOCAL` | Local Devnet | Mysticeti (development parameter profile) | Allowed (`0x<64-hex>`, `<64-hex>`, `kvnc<72-hex>dag`) | Unsupported (`-32601` / `-32600`) | **Supported** | Local single-node / cluster testing |
 
 ---
 
@@ -27,6 +27,7 @@
    - On **Devnet (`3`)** and **Local (`1337`)**, legacy hex addresses (with lowercase `0x` prefix or bare 64-char hex) are accepted by `isLegacyAddressAllowed`.
 3. **RPC Handler Surface:**
    - **Mainnet (`1`)** and **Testnet (`2`)** expose PoW and DAG RPC methods (`kovanica_getMiningInfo`, `kovanica_getDagTips`) returning `chain_id`, `difficulty`, `network_hashrate_estimate`, `target_bits`, and `ghostdag_k`.
+   - **Legacy staking methods are chain-scoped.** Since L1 #272 (`4181fc6`), `kovanica_getValidators` (`there is no validator set`), `kovanica_getStake` (`stake is not used for consensus`), and `kovanica_getLeaderSchedule` (`there is no committee leader schedule`) return JSON-RPC `-32600` on Mainnet (`1`) and Testnet (`2`). The Playground still lists them in the method picker; selecting one on a hybrid node surfaces the node's `-32600` error verbatim. They remain available on Devnet (`3`) and Local (`1337`).
 4. **Cryptographic Domain Separation & Replay Protection:**
    - Every signed L1 artifact embeds `chain_id` (`u64` little-endian) in its domain-separated preimage (`"KVNC/tx/v1"`, `"KVNC/vote/v1"`, `"KVNC/timeout/v1"`, `"KVNC/commit/v1"`, `"KVNC-VRF1-v1"`).
 5. **Network Identity Tag (`networkTag`) Handshake:**
