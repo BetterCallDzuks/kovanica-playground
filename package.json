@@ -5,7 +5,7 @@
   "type": "module",
   "kovanicaSdk": {
     "repository": "https://github.com/KovanicaDAG/kovanica-sdk",
-    "testedRevision": "b534224abf747ba4abe7331fb99ce563aee6362b"
+    "testedRevision": "b4cda3b636e2b323dbac1b7d4a8df31e26e2f7a7"
   },
   "scripts": {
     "prepare:sdk": "node scripts/prepare-sdk.mjs",
@@ -22,6 +22,9 @@
     "test:live:required": "node scripts/prepare-sdk.mjs && KOVANICA_REQUIRE_LIVE=1 vitest run tests/live-node.test.ts"
   },
   "dependencies": {
+    "@noble/ed25519": "^3.2.0",
+    "@noble/hashes": "^2.4.0",
+    "@scure/bip39": "^2.4.0",
     "kovanica-sdk": "file:../kovanica-sdk",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"

@@ -13,6 +13,7 @@ import {
   type MethodDefinition,
   validateParam,
 } from "./methods";
+import { WalletContractConsole } from "./components/WalletContractConsole";
 
 // Safe JSON serializer that handles BigInt without throwing
 function formatJson(data: unknown): string {
@@ -35,6 +36,7 @@ export default function App() {
   // Target Network & Endpoint
   const [selectedChainId, setSelectedChainId] = useState<number>(CHAIN_IDS.TESTNET);
   const [rpcUrl, setRpcUrl] = useState<string>("http://127.0.0.1:8545/rpc");
+  const [mainTab, setMainTab] = useState<"rpc" | "wallet">("rpc");
   const [connectedNodeChainId, setConnectedNodeChainId] = useState<number | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [miningInfo, setMiningInfo] = useState<MiningInfo | null>(null);
@@ -581,8 +583,41 @@ export default function App() {
           </div>
         )}
 
-        {/* Multi-Column Layout */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+        {/* Navigation Tabs */}
+        <div className="flex items-center gap-2 border-b border-border pb-3">
+          <button
+            type="button"
+            data-testid="tab-rpc-explorer"
+            onClick={() => setMainTab("rpc")}
+            className={`px-4 py-2 text-xs font-semibold rounded-lg transition-colors ${
+              mainTab === "rpc"
+                ? "bg-gold text-bg font-bold shadow-sm"
+                : "bg-surface text-muted hover:text-fg border border-border"
+            }`}
+          >
+            RPC Explorer & Node Diagnostics
+          </button>
+          <button
+            type="button"
+            data-testid="tab-wallet-contracts"
+            onClick={() => setMainTab("wallet")}
+            className={`px-4 py-2 text-xs font-semibold rounded-lg transition-colors ${
+              mainTab === "wallet"
+                ? "bg-gold text-bg font-bold shadow-sm"
+                : "bg-surface text-muted hover:text-fg border border-border"
+            }`}
+          >
+            HD Wallet & Wasmi Contracts (PRO-53 / PRO-48)
+          </button>
+        </div>
+
+        {/* HD Wallet & Wasmi Contract Console (PRO-53 & PRO-48) */}
+        <div className={mainTab === "wallet" ? "block" : "hidden"}>
+          <WalletContractConsole client={client} selectedChainId={selectedChainId} />
+        </div>
+
+        {/* Multi-Column Layout (RPC Explorer & Node Diagnostics) */}
+        <div className={`grid grid-cols-1 lg:grid-cols-12 gap-6 items-start ${mainTab === "rpc" ? "block" : "hidden"}`}>
           {/* Main Column: RPC Method Explorer (7 cols) */}
           <section className="lg:col-span-7 flex flex-col gap-6">
             <div className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-5">

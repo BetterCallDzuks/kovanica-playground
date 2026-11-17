@@ -23,7 +23,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: KovanicaDAG/kovanica-sdk
-          ref: b534224abf747ba4abe7331fb99ce563aee6362b
+          ref: b4cda3b636e2b323dbac1b7d4a8df31e26e2f7a7
           path: kovanica-sdk
 
       - name: Use Node.js ${{ matrix.node-version }}
