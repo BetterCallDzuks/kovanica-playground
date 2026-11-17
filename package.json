@@ -5,7 +5,7 @@
   "type": "module",
   "kovanicaSdk": {
     "repository": "https://github.com/KovanicaDAG/kovanica-sdk",
-    "testedRevision": "9a8a20457f9897b6b376fdf601121e53be0d5123"
+    "testedRevision": "b534224abf747ba4abe7331fb99ce563aee6362b"
   },
   "scripts": {
     "prepare:sdk": "node scripts/prepare-sdk.mjs",

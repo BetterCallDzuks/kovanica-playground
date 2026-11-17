@@ -11,7 +11,7 @@ describe("Immutable SDK Pin & Traceability", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
     const pinnedSha = pkg?.kovanicaSdk?.testedRevision;
 
-    expect(pinnedSha).toBe("9a8a20457f9897b6b376fdf601121e53be0d5123");
+    expect(pinnedSha).toBe("b534224abf747ba4abe7331fb99ce563aee6362b");
     expect(pinnedSha).toMatch(/^[0-9a-f]{40}$/);
 
     const ciWorkflow = fs.readFileSync(path.join(rootDir, ".github/workflows/ci.yml"), "utf8");
@@ -86,8 +86,9 @@ describe("Playground Allowlisted Methods", () => {
     expect(validateParam(addressParam, hex, CHAIN_IDS.TESTNET).valid).toBe(false);
     expect(validateParam(addressParam, hex, CHAIN_IDS.HYBRID_TESTNET).valid).toBe(false);
 
-    // Bare hex on Devnet (Chain 3) -> valid legacy address (once testedRevision is bumped past kovanica-sdk#11, 1337 is also rejected)
+    // Bare hex on Devnet (Chain 3) -> valid legacy address; retired chain 1337 is rejected
     expect(validateParam(addressParam, hex, CHAIN_IDS.DEVNET).valid).toBe(true);
+    expect(validateParam(addressParam, hex, 1337).valid).toBe(false);
   });
 
   it("validates hex32 parameters", () => {
