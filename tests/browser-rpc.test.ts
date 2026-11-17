@@ -994,13 +994,14 @@ describe("Browser RPC Acceptance & Diagnostics UI (Headless Chromium)", { timeou
 
       await page.goto(server.url, { waitUntil: "domcontentloaded" });
       const committedHeight = page.locator('[data-testid="diagnostic-committed-height"]');
-      await expectText(committedHeight, "100", 12000);
+      // Initial mount performs two syncStatus probes (Probe 1 = 100, Probe 2 = delayed/abort).
+      // Assert the first result quickly, before the 10s background poll can overwrite it.
+      await expectText(committedHeight, "100", 3000);
 
       const refreshBtn = page.getByRole("button", { name: "Refresh" });
 
-      // Click refresh to trigger Probe 2 (delayed)
+      // Trigger the third probe (200) via refresh clicks.
       await refreshBtn.click();
-      // Click refresh again to trigger Probe 3 (succeeds)
       await refreshBtn.click();
 
       // Probe 3 success updates height to 200
