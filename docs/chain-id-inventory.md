@@ -10,7 +10,7 @@
 
 | Chain ID | Constant (`CHAIN_IDS`) | Network Name | Official Network Tag (`networkTag`) | Consensus Engine | Legacy Hex Address Policy | Mining RPC (`getMiningInfo` / `getDagTips`) | Legacy Staking RPC (`getValidators` / `getStake` / `getLeaderSchedule`) | Primary Role |
 |---:|---|---|---|---|---|---|---|---|
-| `1` | `MAINNET` | Mainnet | `1-4d827d40dd9655db` (frozen, L1 #290) | Hybrid PoW + GHOSTDAG (`K = 5`, target `4000 ms`, KovanicaHash, no stake in consensus) | **Rejected** (Strict PRO-21 base32 `kvnc...dag` only) | **Supported** (`kovanica_getMiningInfo`, `kovanica_getDagTips`) | **Rejected** with `-32600` (`InvalidRequest`) — no validator set, no stake, no committee schedule (L1 #272) | Production Mainnet |
+| `1` | `MAINNET` | Mainnet | `1-f35df34c92001436` (frozen, L1 #290) | Hybrid PoW + GHOSTDAG (`K = 5`, target `4000 ms`, KovanicaHash, no stake in consensus) | **Rejected** (Strict PRO-21 base32 `kvnc...dag` only) | **Supported** (`kovanica_getMiningInfo`, `kovanica_getDagTips`) | **Rejected** with `-32600` (`InvalidRequest`) — no validator set, no stake, no committee schedule (L1 #272) | Production Mainnet |
 | `2` | `TESTNET` / `HYBRID_TESTNET` | Testnet | `2-acfdf6a6c80fd28a` (frozen) | Hybrid PoW + GHOSTDAG (`K = 5`, target `4000 ms`, KovanicaHash, no stake in consensus, ADR 0003) | **Rejected** (Strict PRO-21 base32 `kvnc...dag` only) | **Supported** (`kovanica_getMiningInfo`, `kovanica_getDagTips`) | **Rejected** with `-32600` (`InvalidRequest`) — no validator set, no stake, no committee schedule (L1 #272) | Public Hybrid PoW Testnet |
 | `3` | `DEVNET` | Devnet | `3-<16-hex>` (ephemeral) | Mysticeti (development parameter profile) | Allowed (`0x<64-hex>`, `<64-hex>`, `kvnc<72-hex>dag`) | Unsupported (`-32601` / `-32600`) | **Supported** | Ephemeral Devnet & local single-node / cluster testing |
 
@@ -30,7 +30,7 @@
 4. **Cryptographic Domain Separation & Replay Protection:**
    - Every signed L1 artifact embeds `chain_id` (`u64` little-endian) in its domain-separated preimage (`"KVNC/tx/v1"`, `"KVNC/vote/v1"`, `"KVNC/timeout/v1"`, `"KVNC/commit/v1"`, `"KVNC-VRF1-v1"`).
 5. **Network Identity Tag (`networkTag`) Handshake:**
-   - `kovanica_syncStatus` returns `networkTag` formatted as `<chain_id>-<16_hex_genesis_prefix>` — official frozen tags are **`1-4d827d40dd9655db`** on Mainnet (`1`, established by the L1 #290 `P4-3` genesis ceremony; bundle `kovanica-mainnet-genesis.tar.gz` `sha256: 75403dff7380c3066b479b80c8b7ae37b7df165fa2283a5cbf6fa4e2be554c2e`) and **`2-acfdf6a6c80fd28a`** on Testnet (`2`; bundle `kovanica-testnet-genesis.tar.gz` `sha256: 0892ff8056b1a4d999141752d258750b02be7e141ae0e742b1721b3d2bcfd38a`) — which the Playground parses to detect mismatches between the user-selected network and the connected RPC endpoint.
+   - `kovanica_syncStatus` returns `networkTag` formatted as `<chain_id>-<16_hex_genesis_prefix>` — official frozen tags are **`1-f35df34c92001436`** on Mainnet (`1`, established by the L1 #290 `P4-3` genesis ceremony; bundle `kovanica-mainnet-genesis.tar.gz` `sha256: d0ac07ba0bbe7fff87f3a7713a19239ceebb201944b4984d579a1f5f60edd7bf`) and **`2-acfdf6a6c80fd28a`** on Testnet (`2`; bundle `kovanica-testnet-genesis.tar.gz` `sha256: 0892ff8056b1a4d999141752d258750b02be7e141ae0e742b1721b3d2bcfd38a`) — which the Playground parses to detect mismatches between the user-selected network and the connected RPC endpoint.
 
 ---
 

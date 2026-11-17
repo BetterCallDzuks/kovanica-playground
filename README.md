@@ -22,7 +22,7 @@ Kovanica Playground reflects the established Kovanica design system:
 ## Features
 
 1. **Network & Endpoint Selector:**
-   - Choose between the canonical Kovanica networks: Mainnet (`1`, official network tag `1-4d827d40dd9655db`), Testnet (`2`, official network tag `2-acfdf6a6c80fd28a`), and Devnet (`3`).
+   - Choose between the canonical Kovanica networks: Mainnet (`1`, official network tag `1-f35df34c92001436`), Testnet (`2`, official network tag `2-acfdf6a6c80fd28a`), and Devnet (`3`).
    - Configurable RPC URL (defaults to local loopback node `http://127.0.0.1:8545/rpc`).
    - **Chain Mismatch Warning:** Alerts the developer immediately if the connected node reports a Chain ID that does not match the active target network.
    - **Honest Connectivity Diagnostics:** Surfaces detailed connection failure diagnostics explaining possible root causes (node offline, port closed, network unreachable, CORS) without falsely claiming CORS is confirmed without evidence.
@@ -121,7 +121,7 @@ npm run test:browser:live:required
 
 ## Chain-ID Inventory
 
-See [`docs/chain-id-inventory.md`](docs/chain-id-inventory.md) for the complete inventory of canonical chain-ID definitions (`1` Mainnet with frozen network tag `1-4d827d40dd9655db`, `2` Testnet with frozen network tag `2-acfdf6a6c80fd28a`, and `3` Devnet) across `kovanica-playground`, `kovanica-sdk`, and L1.
+See [`docs/chain-id-inventory.md`](docs/chain-id-inventory.md) for the complete inventory of canonical chain-ID definitions (`1` Mainnet with frozen network tag `1-f35df34c92001436`, `2` Testnet with frozen network tag `2-acfdf6a6c80fd28a`, and `3` Devnet) across `kovanica-playground`, `kovanica-sdk`, and L1.
 
 ---
 
