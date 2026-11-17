@@ -2,9 +2,20 @@ import { describe, expect, it } from "vitest";
 import { CHAIN_IDS, KOVANICA_COIN_TYPE } from "kovanica-sdk";
 import * as ed from "@noble/ed25519";
 import {
+  buildEscrowCreateCall,
+  buildEscrowCreateCallTx,
+  buildHtlcCreateCall,
+  buildHtlcCreateCallTx,
+  buildNameRegisterCall,
+  buildNameRegisterCallTx,
+  buildNftMintCall,
+  buildNftMintCallTx,
   buildTokenTransferCall,
   buildVaultCreateCall,
   deriveAccountsFromMnemonic,
+  encodeBincodeBytes32Vec,
+  encodeBincodeString,
+  encodeBincodeStringVec,
   formatAddressForChain,
   generateMnemonic,
   hexToBytes,
@@ -147,10 +158,193 @@ describe("Ecosystem HD Wallet & Wasmi Contract Interoperability (PRO-53, PRO-48)
       expect(signed.rawTxBytes.length).toBeGreaterThan(150);
     });
 
+    it("serializes Bincode strings and vectors deterministically", () => {
+      const strEnc = encodeBincodeString("alice");
+      expect(strEnc.length).toBe(8 + 5);
+      // Length prefix is 5 (u64le: 05 00 00 00 00 00 00 00)
+      expect(Array.from(strEnc.slice(0, 8))).toEqual([5, 0, 0, 0, 0, 0, 0, 0]);
+      expect(new TextDecoder().decode(strEnc.slice(8))).toBe("alice");
+
+      const strVecEnc = encodeBincodeStringVec(["a", "bc"]);
+      // Count prefix is 2
+      expect(Array.from(strVecEnc.slice(0, 8))).toEqual([2, 0, 0, 0, 0, 0, 0, 0]);
+      // First string: 8 bytes len + 1 byte "a" = 9 bytes
+      // Second string: 8 bytes len + 2 bytes "bc" = 10 bytes
+      expect(strVecEnc.length).toBe(8 + 9 + 10);
+
+      const pk1 = hexToBytes("11".repeat(32));
+      const pk2 = hexToBytes("22".repeat(32));
+      const bytesVecEnc = encodeBincodeBytes32Vec([pk1, pk2]);
+      expect(Array.from(bytesVecEnc.slice(0, 8))).toEqual([2, 0, 0, 0, 0, 0, 0, 0]);
+      expect(bytesVecEnc.length).toBe(8 + 32 + 32);
+    });
+
+    it("constructs and signs a name_register smart contract call (String, [u8; 32], Vec<String>)", () => {
+      const accounts = deriveAccountsFromMnemonic(goldenMnemonic, "", 2, CHAIN_IDS.TESTNET);
+      const sender = accounts[0];
+      const targetPubkey = accounts[1].publicKey;
+      const contract = hexToBytes("36".repeat(32));
+      const endpoints = ["https://relay1.kovanica.org", "https://relay2.kovanica.org"];
+
+      const args = buildNameRegisterCall("alice", targetPubkey, endpoints);
+      expect(args instanceof Uint8Array).toBe(true);
+
+      // Verify layout: 8 (len 'alice') + 5 ('alice') + 32 (pubkey) + 8 (vec len 2) + (8 + 27) + (8 + 27) = 115
+      const expectedLen = 8 + 5 + 32 + 8 + (8 + "https://relay1.kovanica.org".length) + (8 + "https://relay2.kovanica.org".length);
+      expect(args.length).toBe(expectedLen);
+
+      // Name length prefix is 5
+      expect(Array.from(args.slice(0, 8))).toEqual([5, 0, 0, 0, 0, 0, 0, 0]);
+      // Name bytes
+      expect(new TextDecoder().decode(args.slice(8, 13))).toBe("alice");
+      // Pubkey at offset 13
+      expect(args.slice(13, 13 + 32)).toEqual(targetPubkey);
+
+      // Sign transaction
+      const nameCallTx = buildNameRegisterCallTx(contract, "alice", targetPubkey, endpoints);
+      expect(nameCallTx.method).toBe("name_register");
+      expect(nameCallTx.args).toEqual(args);
+
+      const tx: UnsignedTx = {
+        sender: sender.publicKey,
+        nonce: 102n,
+        kind: nameCallTx,
+        fee: 35_000n,
+      };
+
+      const signed = signAndSerializeTransaction(tx, sender.secretKey, CHAIN_IDS.TESTNET);
+      expect(ed.verify(signed.signature, signed.sighash, sender.publicKey)).toBe(true);
+      expect(signed.rawTxHex.includes("06000000")).toBe(true); // Call wire tag 6
+    });
+
+    it("constructs and signs an htlc_create smart contract call ([u8; 32], u64, [u8; 32])", () => {
+      const accounts = deriveAccountsFromMnemonic(goldenMnemonic, "", 2, CHAIN_IDS.TESTNET);
+      const sender = accounts[0];
+      const recipient = accounts[1].publicKey;
+      const contract = hexToBytes("44".repeat(32));
+      const hashlock = hexToBytes("ab".repeat(32));
+      const timelock = 1750000000n;
+
+      const args = buildHtlcCreateCall(hashlock, timelock, recipient);
+      // Exact length: 32 + 8 + 32 = 72 bytes
+      expect(args.length).toBe(72);
+      expect(args.slice(0, 32)).toEqual(hashlock);
+      // Timelock u64le at offset 32..40
+      const view = new DataView(args.buffer, args.byteOffset + 32, 8);
+      expect(view.getBigUint64(0, true)).toBe(timelock);
+      expect(args.slice(40, 72)).toEqual(recipient);
+
+      // Build call transaction
+      const htlcCallTx = buildHtlcCreateCallTx(contract, hashlock, timelock, recipient);
+      expect(htlcCallTx.method).toBe("htlc_create");
+      expect(htlcCallTx.args).toEqual(args);
+
+      const tx: UnsignedTx = {
+        sender: sender.publicKey,
+        nonce: 103n,
+        kind: htlcCallTx,
+        fee: 25_000n,
+      };
+
+      const signed = signAndSerializeTransaction(tx, sender.secretKey, CHAIN_IDS.TESTNET);
+      expect(ed.verify(signed.signature, signed.sighash, sender.publicKey)).toBe(true);
+    });
+
+    it("constructs and signs an nft_mint smart contract call ([u8; 32], [u8; 32], u128, String)", () => {
+      const accounts = deriveAccountsFromMnemonic(goldenMnemonic, "", 2, CHAIN_IDS.TESTNET);
+      const sender = accounts[0];
+      const recipient = accounts[1].publicKey;
+      const contract = hexToBytes("55".repeat(32));
+      const collection = hexToBytes("cc".repeat(32));
+      const tokenId = 42n;
+      const tokenUri = "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
+
+      const args = buildNftMintCall(collection, recipient, tokenId, tokenUri);
+      // Expected length: 32 + 32 + 16 + 8 + len(tokenUri) = 88 + 66 = 154
+      expect(args.length).toBe(88 + tokenUri.length);
+      expect(args.slice(0, 32)).toEqual(collection);
+      expect(args.slice(32, 64)).toEqual(recipient);
+      // u128le token id at 64..80
+      const lowView = new DataView(args.buffer, args.byteOffset + 64, 8);
+      expect(lowView.getBigUint64(0, true)).toBe(42n);
+      // String length prefix at 80..88
+      const strLenView = new DataView(args.buffer, args.byteOffset + 80, 8);
+      expect(strLenView.getBigUint64(0, true)).toBe(BigInt(tokenUri.length));
+      expect(new TextDecoder().decode(args.slice(88))).toBe(tokenUri);
+
+      // Build call transaction
+      const nftCallTx = buildNftMintCallTx(contract, collection, recipient, tokenId, tokenUri);
+      expect(nftCallTx.method).toBe("nft_mint");
+      expect(nftCallTx.args).toEqual(args);
+
+      const tx: UnsignedTx = {
+        sender: sender.publicKey,
+        nonce: 104n,
+        kind: nftCallTx,
+        fee: 30_000n,
+      };
+
+      const signed = signAndSerializeTransaction(tx, sender.secretKey, CHAIN_IDS.TESTNET);
+      expect(ed.verify(signed.signature, signed.sighash, sender.publicKey)).toBe(true);
+    });
+
+    it("constructs and signs an escrow_create smart contract call (Vec<[u8; 32]>, u8, u64, u64)", () => {
+      const accounts = deriveAccountsFromMnemonic(goldenMnemonic, "", 2, CHAIN_IDS.TESTNET);
+      const sender = accounts[0];
+      const parties = [accounts[0].publicKey, accounts[1].publicKey];
+      const contract = hexToBytes("66".repeat(32));
+      const threshold = 2;
+      const amount = 500_000_000n;
+      const deadline = 1750000000n;
+
+      const args = buildEscrowCreateCall(parties, threshold, amount, deadline);
+      // Expected length: 8 (count) + 64 (2*32) + 1 (threshold) + 8 (amount) + 8 (deadline) = 89
+      expect(args.length).toBe(89);
+      expect(Array.from(args.slice(0, 8))).toEqual([2, 0, 0, 0, 0, 0, 0, 0]);
+      expect(args.slice(8, 40)).toEqual(parties[0]);
+      expect(args.slice(40, 72)).toEqual(parties[1]);
+      expect(args[72]).toBe(2);
+
+      const amountView = new DataView(args.buffer, args.byteOffset + 73, 8);
+      expect(amountView.getBigUint64(0, true)).toBe(amount);
+      const deadlineView = new DataView(args.buffer, args.byteOffset + 81, 8);
+      expect(deadlineView.getBigUint64(0, true)).toBe(deadline);
+
+      // Invalid threshold
+      expect(() => buildEscrowCreateCall(parties, 300, amount, deadline)).toThrow(/Threshold must be between 0 and 255/);
+
+      // Build call transaction
+      const escrowCallTx = buildEscrowCreateCallTx(contract, parties, threshold, amount, deadline);
+      expect(escrowCallTx.method).toBe("escrow_create");
+      expect(escrowCallTx.args).toEqual(args);
+
+      const tx: UnsignedTx = {
+        sender: sender.publicKey,
+        nonce: 105n,
+        kind: escrowCallTx,
+        fee: 40_000n,
+      };
+
+      const signed = signAndSerializeTransaction(tx, sender.secretKey, CHAIN_IDS.TESTNET);
+      expect(ed.verify(signed.signature, signed.sighash, sender.publicKey)).toBe(true);
+    });
+
+    it("rejects invalid arguments gracefully in builders", () => {
+      const valid32 = hexToBytes("11".repeat(32));
+      const invalidShort = new Uint8Array(16);
+
+      expect(() => buildNameRegisterCall("bob", invalidShort, [])).toThrow(/Expected 32-byte pubkey/);
+      expect(() => buildHtlcCreateCall(invalidShort, 100n, valid32)).toThrow(/Expected 32-byte hashlock/);
+      expect(() => buildHtlcCreateCall(valid32, 100n, invalidShort)).toThrow(/Expected 32-byte recipient/);
+      expect(() => buildNftMintCall(invalidShort, valid32, 1n, "uri")).toThrow(/Expected 32-byte collection/);
+      expect(() => buildNftMintCall(valid32, invalidShort, 1n, "uri")).toThrow(/Expected 32-byte to pubkey/);
+      expect(() => encodeBincodeBytes32Vec([valid32, invalidShort])).toThrow(/Expected 32-byte item/);
+    });
+
     it("passes all steps in runGoldenVectorSelfTest()", () => {
       const result = runGoldenVectorSelfTest();
       expect(result.ok).toBe(true);
-      expect(result.steps.length).toBeGreaterThanOrEqual(6);
+      expect(result.steps.length).toBeGreaterThanOrEqual(10);
       for (const step of result.steps) {
         expect(step.passed).toBe(true);
       }

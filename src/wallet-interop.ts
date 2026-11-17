@@ -70,6 +70,30 @@ export function concat(arrays: Uint8Array[]): Uint8Array {
   return out;
 }
 
+export function encodeBincodeString(str: string): Uint8Array {
+  const bytes = new TextEncoder().encode(str);
+  return concat([u64le(BigInt(bytes.length)), bytes]);
+}
+
+export function encodeBincodeStringVec(strings: string[]): Uint8Array {
+  const parts: Uint8Array[] = [u64le(BigInt(strings.length))];
+  for (const s of strings) {
+    parts.push(encodeBincodeString(s));
+  }
+  return concat(parts);
+}
+
+export function encodeBincodeBytes32Vec(items: Uint8Array[]): Uint8Array {
+  const parts: Uint8Array[] = [u64le(BigInt(items.length))];
+  for (const item of items) {
+    if (item.length !== 32) {
+      throw new Error(`Expected 32-byte item, got ${item.length}`);
+    }
+    parts.push(item);
+  }
+  return concat(parts);
+}
+
 export function bytesToHex(bytes: Uint8Array): string {
   let hex = "";
   for (let i = 0; i < bytes.length; i++) {
@@ -303,6 +327,150 @@ export function buildVaultCreateCall(
   };
 }
 
+export function buildNameRegisterCall(
+  name: string,
+  pubkey: Uint8Array,
+  relayEndpoints: string[],
+): Uint8Array {
+  if (pubkey.length !== 32) {
+    throw new Error(`Expected 32-byte pubkey, got ${pubkey.length}`);
+  }
+  return concat([
+    encodeBincodeString(name),
+    pubkey,
+    encodeBincodeStringVec(relayEndpoints),
+  ]);
+}
+export const encodeNameRegisterArgs = buildNameRegisterCall;
+
+export function buildNameRegisterCallTx(
+  contractPubkey: Uint8Array,
+  name: string,
+  pubkey: Uint8Array,
+  relayEndpoints: string[],
+  gasLimit = 100_000n,
+): CallTxKind {
+  return {
+    type: "call",
+    contract: contractPubkey,
+    value: 0n,
+    method: "name_register",
+    args: buildNameRegisterCall(name, pubkey, relayEndpoints),
+    gasLimit,
+  };
+}
+
+export function buildHtlcCreateCall(
+  hashlock: Uint8Array,
+  timelock: bigint | number,
+  recipient: Uint8Array,
+): Uint8Array {
+  if (hashlock.length !== 32) {
+    throw new Error(`Expected 32-byte hashlock, got ${hashlock.length}`);
+  }
+  if (recipient.length !== 32) {
+    throw new Error(`Expected 32-byte recipient, got ${recipient.length}`);
+  }
+  return concat([
+    hashlock,
+    u64le(timelock),
+    recipient,
+  ]);
+}
+export const encodeHtlcCreateArgs = buildHtlcCreateCall;
+
+export function buildHtlcCreateCallTx(
+  contractPubkey: Uint8Array,
+  hashlock: Uint8Array,
+  timelock: bigint | number,
+  recipient: Uint8Array,
+  gasLimit = 100_000n,
+): CallTxKind {
+  return {
+    type: "call",
+    contract: contractPubkey,
+    value: 0n,
+    method: "htlc_create",
+    args: buildHtlcCreateCall(hashlock, timelock, recipient),
+    gasLimit,
+  };
+}
+
+export function buildNftMintCall(
+  collection: Uint8Array,
+  to: Uint8Array,
+  tokenId: bigint | number,
+  tokenUri: string,
+): Uint8Array {
+  if (collection.length !== 32) {
+    throw new Error(`Expected 32-byte collection, got ${collection.length}`);
+  }
+  if (to.length !== 32) {
+    throw new Error(`Expected 32-byte to pubkey, got ${to.length}`);
+  }
+  return concat([
+    collection,
+    to,
+    u128le(tokenId),
+    encodeBincodeString(tokenUri),
+  ]);
+}
+export const encodeNftMintArgs = buildNftMintCall;
+
+export function buildNftMintCallTx(
+  contractPubkey: Uint8Array,
+  collection: Uint8Array,
+  to: Uint8Array,
+  tokenId: bigint | number,
+  tokenUri: string,
+  gasLimit = 100_000n,
+): CallTxKind {
+  return {
+    type: "call",
+    contract: contractPubkey,
+    value: 0n,
+    method: "nft_mint",
+    args: buildNftMintCall(collection, to, tokenId, tokenUri),
+    gasLimit,
+  };
+}
+
+export function buildEscrowCreateCall(
+  parties: Uint8Array[],
+  threshold: number,
+  amount: bigint | number,
+  deadline: bigint | number,
+): Uint8Array {
+  if (threshold < 0 || threshold > 255) {
+    throw new Error(`Threshold must be between 0 and 255, got ${threshold}`);
+  }
+  return concat([
+    encodeBincodeBytes32Vec(parties),
+    Uint8Array.of(threshold),
+    u64le(amount),
+    u64le(deadline),
+  ]);
+}
+export const encodeEscrowCreateArgs = buildEscrowCreateCall;
+
+export function buildEscrowCreateCallTx(
+  contractPubkey: Uint8Array,
+  parties: Uint8Array[],
+  threshold: number,
+  amount: bigint | number,
+  deadline: bigint | number,
+  gasLimit = 100_000n,
+): CallTxKind {
+  return {
+    type: "call",
+    contract: contractPubkey,
+    value: 0n,
+    method: "escrow_create",
+    args: buildEscrowCreateCall(parties, threshold, amount, deadline),
+    gasLimit,
+  };
+}
+
 // --- Self-Test & Invariant Verification ---
 
 export interface SelfTestStep {
@@ -430,6 +598,93 @@ export function runGoldenVectorSelfTest(): { ok: boolean; steps: SelfTestStep[] 
     passed: isVaultSigValid,
     expected: "Valid bincode serialized vault_create call payload",
     actual: `Signed size: ${vaultSigned.txSize}B, Signature verified: ${isVaultSigValid}`,
+  });
+
+  // Step 5: Wasmi Contract Interoperability (name_register, htlc_create, nft_mint, escrow_create)
+  const nameCallTx = buildNameRegisterCallTx(
+    dummyContractPubkey,
+    "alice",
+    acc1.publicKey,
+    ["https://relay1.kovanica.org", "https://relay2.kovanica.org"],
+  );
+  const nameTx: UnsignedTx = {
+    sender: acc0.publicKey,
+    nonce: 4n,
+    kind: nameCallTx,
+    fee: 25_000n,
+  };
+  const nameSigned = signAndSerializeTransaction(nameTx, acc0.secretKey, CHAIN_IDS.TESTNET);
+  const isNameSigValid = ed.verify(nameSigned.signature, nameSigned.sighash, acc0.publicKey);
+  steps.push({
+    name: "Wasmi Contract Interoperability (name_register ABI layout)",
+    passed: isNameSigValid && nameCallTx.args.length > 0,
+    expected: "Valid bincode serialized name_register call payload",
+    actual: `Signed size: ${nameSigned.txSize}B, Args length: ${nameCallTx.args.length}B`,
+  });
+
+  const htlcCallTx = buildHtlcCreateCallTx(
+    dummyContractPubkey,
+    hexToBytes("11".repeat(32)),
+    1750000000n,
+    acc1.publicKey,
+  );
+  const htlcTx: UnsignedTx = {
+    sender: acc0.publicKey,
+    nonce: 5n,
+    kind: htlcCallTx,
+    fee: 20_000n,
+  };
+  const htlcSigned = signAndSerializeTransaction(htlcTx, acc0.secretKey, CHAIN_IDS.TESTNET);
+  const isHtlcSigValid = ed.verify(htlcSigned.signature, htlcSigned.sighash, acc0.publicKey);
+  steps.push({
+    name: "Wasmi Contract Interoperability (htlc_create 72-byte layout)",
+    passed: isHtlcSigValid && htlcCallTx.args.length === 72,
+    expected: "Exact 72-byte bincode layout for ([u8; 32], u64, [u8; 32])",
+    actual: `Args length: ${htlcCallTx.args.length}B, Signature verified: ${isHtlcSigValid}`,
+  });
+
+  const nftCallTx = buildNftMintCallTx(
+    dummyContractPubkey,
+    hexToBytes("77".repeat(32)),
+    acc1.publicKey,
+    1n,
+    "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+  );
+  const nftTx: UnsignedTx = {
+    sender: acc0.publicKey,
+    nonce: 6n,
+    kind: nftCallTx,
+    fee: 30_000n,
+  };
+  const nftSigned = signAndSerializeTransaction(nftTx, acc0.secretKey, CHAIN_IDS.TESTNET);
+  const isNftSigValid = ed.verify(nftSigned.signature, nftSigned.sighash, acc0.publicKey);
+  steps.push({
+    name: "Wasmi Contract Interoperability (nft_mint ABI layout)",
+    passed: isNftSigValid && nftCallTx.args.length > 88,
+    expected: "Valid bincode serialized nft_mint call payload",
+    actual: `Signed size: ${nftSigned.txSize}B, Args length: ${nftCallTx.args.length}B`,
+  });
+
+  const escrowCallTx = buildEscrowCreateCallTx(
+    dummyContractPubkey,
+    [acc0.publicKey, acc1.publicKey],
+    2,
+    1_000_000_000n,
+    1750000000n,
+  );
+  const escrowTx: UnsignedTx = {
+    sender: acc0.publicKey,
+    nonce: 7n,
+    kind: escrowCallTx,
+    fee: 35_000n,
+  };
+  const escrowSigned = signAndSerializeTransaction(escrowTx, acc0.secretKey, CHAIN_IDS.TESTNET);
+  const isEscrowSigValid = ed.verify(escrowSigned.signature, escrowSigned.sighash, acc0.publicKey);
+  steps.push({
+    name: "Wasmi Contract Interoperability (escrow_create threshold & parties layout)",
+    passed: isEscrowSigValid && escrowCallTx.args.length === 8 + 64 + 1 + 8 + 8,
+    expected: "Exact 89-byte bincode layout for (Vec<[u8; 32]>, u8, u64, u64)",
+    actual: `Args length: ${escrowCallTx.args.length}B, Signature verified: ${isEscrowSigValid}`,
   });
 
   const ok = steps.every((s) => s.passed);

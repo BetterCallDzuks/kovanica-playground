@@ -5,6 +5,10 @@ import {
   KOVANICA_COIN_TYPE,
 } from "kovanica-sdk";
 import {
+  buildEscrowCreateCall,
+  buildHtlcCreateCall,
+  buildNameRegisterCall,
+  buildNftMintCall,
   buildTokenTransferCall,
   buildVaultCreateCall,
   deriveAccountsFromMnemonic,
@@ -34,7 +38,15 @@ export function WalletContractConsole({ client, selectedChainId }: Props) {
   const [activeAccountIdx, setActiveAccountIdx] = useState<number>(0);
 
   // Tx state
-  const [txType, setTxType] = useState<"transfer" | "token_transfer" | "vault_create">("transfer");
+  const [txType, setTxType] = useState<
+    | "transfer"
+    | "token_transfer"
+    | "vault_create"
+    | "name_register"
+    | "htlc_create"
+    | "nft_mint"
+    | "escrow_create"
+  >("transfer");
   const [nonceStr, setNonceStr] = useState<string>("0");
   const [feeStr, setFeeStr] = useState<string>("10000"); // in atoms
 
@@ -47,6 +59,36 @@ export function WalletContractConsole({ client, selectedChainId }: Props) {
   const [tokenUnitsStr, setTokenUnitsStr] = useState<string>("100");
   const [lockUntilMsStr, setLockUntilMsStr] = useState<string>(
     (Date.now() + 86400000).toString(),
+  );
+
+  // Name Registry fields
+  const [nameStr, setNameStr] = useState<string>("alice");
+  const [namePubkeyHex, setNamePubkeyHex] = useState<string>("");
+  const [relayEndpointsStr, setRelayEndpointsStr] = useState<string>(
+    "https://relay1.kovanica.org\nhttps://relay2.kovanica.org",
+  );
+
+  // HTLC fields
+  const [hashlockHex, setHashlockHex] = useState<string>("11".repeat(32));
+  const [timelockStr, setTimelockStr] = useState<string>(
+    (Date.now() + 86400000).toString(),
+  );
+  const [htlcRecipientHex, setHtlcRecipientHex] = useState<string>("");
+
+  // NFT fields
+  const [collectionHex, setCollectionHex] = useState<string>("77".repeat(32));
+  const [nftToHex, setNftToHex] = useState<string>("");
+  const [tokenIdStr, setTokenIdStr] = useState<string>("1");
+  const [tokenUriStr, setTokenUriStr] = useState<string>(
+    "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+  );
+
+  // Escrow fields
+  const [escrowPartiesStr, setEscrowPartiesStr] = useState<string>("");
+  const [escrowThresholdStr, setEscrowThresholdStr] = useState<string>("2");
+  const [escrowAmountStr, setEscrowAmountStr] = useState<string>("1000000000"); // 1 KVNC
+  const [escrowDeadlineStr, setEscrowDeadlineStr] = useState<string>(
+    (Date.now() + 172800000).toString(),
   );
 
   // Output state
@@ -126,12 +168,85 @@ export function WalletContractConsole({ client, selectedChainId }: Props) {
         const recipient = accounts[1]?.publicKey || activeAccount.publicKey;
         const units = BigInt(tokenUnitsStr || "0");
         kind = buildTokenTransferCall(contract, recipient, units);
-      } else {
+      } else if (txType === "vault_create") {
         const contract = hexToBytes(contractHex.trim());
         const beneficiary = accounts[1]?.publicKey || activeAccount.publicKey;
         const atoms = parseKvnc(amountKvncStr || "0");
         const lockUntil = BigInt(lockUntilMsStr || (Date.now() + 86400000).toString());
         kind = buildVaultCreateCall(contract, beneficiary, atoms, lockUntil);
+      } else if (txType === "name_register") {
+        const contract = hexToBytes(contractHex.trim());
+        const regPubkey = namePubkeyHex.trim()
+          ? hexToBytes(namePubkeyHex.trim())
+          : accounts[1]?.publicKey || activeAccount.publicKey;
+        const endpoints = relayEndpointsStr
+          .split("\n")
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0);
+        const args = buildNameRegisterCall(nameStr.trim(), regPubkey, endpoints);
+        kind = {
+          type: "call",
+          contract,
+          value: 0n,
+          method: "name_register",
+          args,
+          gasLimit: 100_000n,
+        };
+      } else if (txType === "htlc_create") {
+        const contract = hexToBytes(contractHex.trim());
+        const hashlock = hexToBytes(hashlockHex.trim());
+        const timelock = BigInt(timelockStr.trim() || "0");
+        const recipient = htlcRecipientHex.trim()
+          ? hexToBytes(htlcRecipientHex.trim())
+          : accounts[1]?.publicKey || activeAccount.publicKey;
+        const args = buildHtlcCreateCall(hashlock, timelock, recipient);
+        kind = {
+          type: "call",
+          contract,
+          value: 0n,
+          method: "htlc_create",
+          args,
+          gasLimit: 100_000n,
+        };
+      } else if (txType === "nft_mint") {
+        const contract = hexToBytes(contractHex.trim());
+        const collection = hexToBytes(collectionHex.trim());
+        const to = nftToHex.trim()
+          ? hexToBytes(nftToHex.trim())
+          : accounts[1]?.publicKey || activeAccount.publicKey;
+        const tokenId = BigInt(tokenIdStr.trim() || "0");
+        const args = buildNftMintCall(collection, to, tokenId, tokenUriStr.trim());
+        kind = {
+          type: "call",
+          contract,
+          value: 0n,
+          method: "nft_mint",
+          args,
+          gasLimit: 100_000n,
+        };
+      } else if (txType === "escrow_create") {
+        const contract = hexToBytes(contractHex.trim());
+        const rawParties = escrowPartiesStr
+          .split(/[\n,]/)
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0);
+        const parties = rawParties.length > 0
+          ? rawParties.map((p) => hexToBytes(p))
+          : [activeAccount.publicKey, accounts[1]?.publicKey || activeAccount.publicKey];
+        const threshold = Number(escrowThresholdStr.trim() || "1");
+        const amount = BigInt(escrowAmountStr.trim() || "0");
+        const deadline = BigInt(escrowDeadlineStr.trim() || "0");
+        const args = buildEscrowCreateCall(parties, threshold, amount, deadline);
+        kind = {
+          type: "call",
+          contract,
+          value: 0n,
+          method: "escrow_create",
+          args,
+          gasLimit: 100_000n,
+        };
+      } else {
+        throw new Error(`Unknown transaction type: ${txType}`);
       }
 
       const tx: UnsignedTx = {
@@ -322,6 +437,10 @@ export function WalletContractConsole({ client, selectedChainId }: Props) {
               <option value="transfer">Native Transfer (KVNC)</option>
               <option value="token_transfer">Wasmi: Token Transfer (token_transfer)</option>
               <option value="vault_create">Wasmi: Timelocked Vault (vault_create)</option>
+              <option value="name_register">Wasmi: Name Registry (name_register)</option>
+              <option value="htlc_create">Wasmi: Hash Time Locked Contract (htlc_create)</option>
+              <option value="nft_mint">Wasmi: NFT Mint (nft_mint)</option>
+              <option value="escrow_create">Wasmi: Escrow Create (escrow_create)</option>
             </select>
           </div>
 
@@ -440,6 +559,244 @@ export function WalletContractConsole({ client, selectedChainId }: Props) {
                     type="text"
                     value={lockUntilMsStr}
                     onChange={(e) => setLockUntilMsStr(e.target.value)}
+                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                  />
+                </div>
+              </div>
+            </>
+          )}
+
+          {txType === "name_register" && (
+            <>
+              <div>
+                <label className="block text-xs font-medium text-muted mb-1">
+                  Name Registry Contract Address (32-byte hex)
+                </label>
+                <input
+                  type="text"
+                  value={contractHex}
+                  onChange={(e) => setContractHex(e.target.value)}
+                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                />
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">
+                    Registered Name
+                  </label>
+                  <input
+                    type="text"
+                    value={nameStr}
+                    onChange={(e) => setNameStr(e.target.value)}
+                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">
+                    Registered Public Key (32-byte hex)
+                  </label>
+                  <input
+                    type="text"
+                    value={namePubkeyHex}
+                    onChange={(e) => setNamePubkeyHex(e.target.value)}
+                    placeholder={accounts[1]?.publicKeyHex || "Defaults to Account #1"}
+                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-muted mb-1">
+                  Relay Endpoints (one URL per line)
+                </label>
+                <textarea
+                  rows={2}
+                  value={relayEndpointsStr}
+                  onChange={(e) => setRelayEndpointsStr(e.target.value)}
+                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                />
+              </div>
+            </>
+          )}
+
+          {txType === "htlc_create" && (
+            <>
+              <div>
+                <label className="block text-xs font-medium text-muted mb-1">
+                  HTLC Contract Address (32-byte hex)
+                </label>
+                <input
+                  type="text"
+                  value={contractHex}
+                  onChange={(e) => setContractHex(e.target.value)}
+                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-muted mb-1">
+                  Hash Lock (32-byte hex)
+                </label>
+                <input
+                  type="text"
+                  value={hashlockHex}
+                  onChange={(e) => setHashlockHex(e.target.value)}
+                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                />
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">
+                    Timelock Expiry (u64 timestamp/height)
+                  </label>
+                  <input
+                    type="text"
+                    value={timelockStr}
+                    onChange={(e) => setTimelockStr(e.target.value)}
+                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">
+                    Recipient Public Key (32-byte hex)
+                  </label>
+                  <input
+                    type="text"
+                    value={htlcRecipientHex}
+                    onChange={(e) => setHtlcRecipientHex(e.target.value)}
+                    placeholder={accounts[1]?.publicKeyHex || "Defaults to Account #1"}
+                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                  />
+                </div>
+              </div>
+            </>
+          )}
+
+          {txType === "nft_mint" && (
+            <>
+              <div>
+                <label className="block text-xs font-medium text-muted mb-1">
+                  NFT Contract Address (32-byte hex)
+                </label>
+                <input
+                  type="text"
+                  value={contractHex}
+                  onChange={(e) => setContractHex(e.target.value)}
+                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                />
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">
+                    Collection Public Key (32-byte hex)
+                  </label>
+                  <input
+                    type="text"
+                    value={collectionHex}
+                    onChange={(e) => setCollectionHex(e.target.value)}
+                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">
+                    Recipient / To Public Key (32-byte hex)
+                  </label>
+                  <input
+                    type="text"
+                    value={nftToHex}
+                    onChange={(e) => setNftToHex(e.target.value)}
+                    placeholder={accounts[1]?.publicKeyHex || "Defaults to Account #1"}
+                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">
+                    Token ID (u128)
+                  </label>
+                  <input
+                    type="text"
+                    value={tokenIdStr}
+                    onChange={(e) => setTokenIdStr(e.target.value)}
+                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                  />
+                </div>
+                <div className="md:col-span-2">
+                  <label className="block text-xs font-medium text-muted mb-1">
+                    Token URI
+                  </label>
+                  <input
+                    type="text"
+                    value={tokenUriStr}
+                    onChange={(e) => setTokenUriStr(e.target.value)}
+                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                  />
+                </div>
+              </div>
+            </>
+          )}
+
+          {txType === "escrow_create" && (
+            <>
+              <div>
+                <label className="block text-xs font-medium text-muted mb-1">
+                  Escrow Contract Address (32-byte hex)
+                </label>
+                <input
+                  type="text"
+                  value={contractHex}
+                  onChange={(e) => setContractHex(e.target.value)}
+                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-muted mb-1">
+                  Parties Public Keys (32-byte hexes, one per line or comma-separated)
+                </label>
+                <textarea
+                  rows={2}
+                  value={escrowPartiesStr}
+                  onChange={(e) => setEscrowPartiesStr(e.target.value)}
+                  placeholder={
+                    accounts.length >= 2
+                      ? `${accounts[0].publicKeyHex}\n${accounts[1].publicKeyHex}`
+                      : "Defaults to Account #0 and #1"
+                  }
+                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                />
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">
+                    Threshold (u8)
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={255}
+                    value={escrowThresholdStr}
+                    onChange={(e) => setEscrowThresholdStr(e.target.value)}
+                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">
+                    Amount (atoms)
+                  </label>
+                  <input
+                    type="text"
+                    value={escrowAmountStr}
+                    onChange={(e) => setEscrowAmountStr(e.target.value)}
+                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">
+                    Deadline (u64 timestamp)
+                  </label>
+                  <input
+                    type="text"
+                    value={escrowDeadlineStr}
+                    onChange={(e) => setEscrowDeadlineStr(e.target.value)}
                     className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
                   />
                 </div>
