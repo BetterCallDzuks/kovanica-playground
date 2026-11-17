@@ -968,7 +968,8 @@ describe("Browser RPC Acceptance & Diagnostics UI (Headless Chromium)", { timeou
   it("drops late errors from superseded probes after a newer success", async () => {
     const page = await newTestPage();
     let probeCount = 0;
-    let resolveFirstProbeErr: (() => void) | null = null;
+    let scenarioStarted = false;
+    let resolveDelayedProbe: (() => void) | null = null;
 
     try {
       await setupRpcRoute(page, async (method, _params, _id, route) => {
@@ -976,17 +977,22 @@ describe("Browser RPC Acceptance & Diagnostics UI (Headless Chromium)", { timeou
           throw { code: -32601, message: "Method not found" };
         }
         if (method === "kovanica_syncStatus") {
-          probeCount++;
-          if (probeCount === 1) {
+          // Mount/setup probes (before the scenario starts) always return 100
+          // without blocking, so initial render is deterministic regardless of
+          // how many probes the mount performs.
+          if (!scenarioStarted) {
             return { catchingUp: false, committedHeight: 100, localTipRound: 100, peerCount: 2 };
           }
-          if (probeCount === 2) {
+          probeCount++;
+          if (probeCount === 1) {
+            // Delayed probe that will abort late.
             await new Promise<void>((res) => {
-              resolveFirstProbeErr = res;
+              resolveDelayedProbe = res;
             });
             await route.abort("failed");
             return;
           }
+          // Third probe succeeds with 200.
           return { catchingUp: false, committedHeight: 200, localTipRound: 200, peerCount: 4 };
         }
         throw { code: -32601, message: "Method not found" };
@@ -994,26 +1000,31 @@ describe("Browser RPC Acceptance & Diagnostics UI (Headless Chromium)", { timeou
 
       await page.goto(server.url, { waitUntil: "domcontentloaded" });
       const committedHeight = page.locator('[data-testid="diagnostic-committed-height"]');
-      // Initial mount performs two syncStatus probes (Probe 1 = 100, Probe 2 = delayed/abort).
-      // Assert the first result quickly, before the 10s background poll can overwrite it.
-      await expectText(committedHeight, "100", 3000);
+      // Initial mount settles on 100 (mount probes never block).
+      await expectText(committedHeight, "100", 5000);
+
+      // Let any in-flight mount probes finish before starting the scenario.
+      await page.waitForTimeout(500);
+      scenarioStarted = true;
+      probeCount = 0;
 
       const refreshBtn = page.getByRole("button", { name: "Refresh" });
 
-      // Trigger the third probe (200) via refresh clicks.
+      // First refresh: delayed probe (will abort late).
       await refreshBtn.click();
+      // Second refresh: succeeds with 200.
       await refreshBtn.click();
 
-      // Probe 3 success updates height to 200
+      // Third probe success updates height to 200.
       await expectText(committedHeight, "200");
 
-      // Now release Probe 2 error
-      if (resolveFirstProbeErr) {
-        (resolveFirstProbeErr as () => void)();
+      // Now release the delayed probe's error.
+      if (resolveDelayedProbe) {
+        (resolveDelayedProbe as () => void)();
       }
       await page.waitForTimeout(200);
 
-      // Height must still be 200; Probe 2 error must NOT wipe out diagnostics
+      // Height must still be 200; the late error must NOT wipe out diagnostics.
       await expectText(committedHeight, "200");
       const banner = page.locator('[data-testid="network-error-banner"]');
       await expectNotVisible(banner);
