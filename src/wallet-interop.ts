@@ -8,12 +8,27 @@ import {
   bip39Seed,
   CHAIN_IDS,
   decodeAddress,
+  decodeEscrowRecord,
+  decodeHtlcRecord,
+  decodeMultisigState,
+  decodeNameRecord,
+  decodeNftMetadata,
+  decodeTokenMetadata,
+  decodeVaultRecord,
   deriveBip44,
+  deriveStorageSlotHex,
   encodeAddress,
+  estimateAndBuildCall,
+  estimateCallTxSize,
   formatBip44Path,
   getPublicKey,
   KOVANICA_COIN_TYPE,
+  KovanicaDecodeError,
   TESTNET_ADDRESS_PREFIX,
+  type EstimateAndBuildCallClient,
+  type EstimateAndBuildCallOptions,
+  type PreparedCallTransaction,
+  type StorageSlotContract,
 } from "kovanica-sdk";
 
 // Configure ed25519 sha512 provider
@@ -689,4 +704,74 @@ export function runGoldenVectorSelfTest(): { ok: boolean; steps: SelfTestStep[] 
 
   const ok = steps.every((s) => s.passed);
   return { ok, steps };
+}
+
+// --- SDK v0.4.0 Fee/Gas Estimation & Typed Bincode State Decoders ---
+
+export {
+  deriveStorageSlotHex,
+  estimateAndBuildCall,
+  estimateCallTxSize,
+  KovanicaDecodeError,
+  type EstimateAndBuildCallClient,
+  type EstimateAndBuildCallOptions,
+  type PreparedCallTransaction,
+  type StorageSlotContract,
+};
+
+export type ContractDecoderKind =
+  | "name"
+  | "htlc"
+  | "escrow"
+  | "vault"
+  | "token_metadata"
+  | "nft_metadata"
+  | "multisig";
+
+/**
+ * Estimates fee, gas limit, serialized wire size, and sender nonce for a
+ * Wasmi contract call using `kovanica-sdk`'s `estimateAndBuildCall`.
+ */
+export async function estimateContractCall(
+  client: EstimateAndBuildCallClient,
+  call: CallTxKind,
+  options: EstimateAndBuildCallOptions = {},
+): Promise<PreparedCallTransaction> {
+  return estimateAndBuildCall(
+    client,
+    {
+      contract: call.contract,
+      method: call.method,
+      args: call.args,
+      call_value: call.value,
+      gas_limit: call.gasLimit,
+    },
+    options,
+  );
+}
+
+/**
+ * Decodes a hex-encoded (or raw Uint8Array) Bincode 1.x contract state record
+ * using `kovanica-sdk` v0.4.0 typed ABI decoders.
+ */
+export function decodeContractStateHex(
+  kind: ContractDecoderKind,
+  input: string | Uint8Array,
+): unknown {
+  switch (kind) {
+    case "name":
+      return decodeNameRecord(input);
+    case "htlc":
+      return decodeHtlcRecord(input);
+    case "escrow":
+      return decodeEscrowRecord(input);
+    case "vault":
+      return decodeVaultRecord(input);
+    case "token_metadata":
+      return decodeTokenMetadata(input);
+    case "nft_metadata":
+      return decodeNftMetadata(input);
+    case "multisig":
+      return decodeMultisigState(input);
+  }
 }

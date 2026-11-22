@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -20,7 +21,7 @@ const PLAYGROUND_ROOT = resolve(__dirname, "..");
 
 const pkg = JSON.parse(readFileSync(join(PLAYGROUND_ROOT, "package.json"), "utf8"));
 const PINNED_SDK_SHA = pkg?.kovanicaSdk?.testedRevision;
-const SDK_REPO_URL = `${pkg?.kovanicaSdk?.repository || "https://github.com/KovanicaDAG/kovanica-sdk"}.git`;
+const SDK_REPO_URL = `${pkg?.kovanicaSdk?.repository || "https://github.com/KovanicaProtokol/kovanica-sdk"}.git`;
 const SIBLING_SDK_DIR = resolve(PLAYGROUND_ROOT, "../kovanica-sdk");
 const INSTALLED_SDK_DIR = join(PLAYGROUND_ROOT, "node_modules", "kovanica-sdk");
 
@@ -63,12 +64,18 @@ if (!existsSync(join(PLAYGROUND_ROOT, "node_modules"))) {
 const markerPath = join(INSTALLED_SDK_DIR, ".tested-revision");
 const installedIsSymlink = existsSync(INSTALLED_SDK_DIR) && lstatSync(INSTALLED_SDK_DIR).isSymbolicLink();
 
-if (siblingHead === PINNED_SDK_SHA && siblingClean && installedIsSymlink) {
+if (siblingHead === PINNED_SDK_SHA && siblingClean) {
   const siblingDist = join(SIBLING_SDK_DIR, "dist", "index.js");
   if (!existsSync(siblingDist)) {
     console.log(`[prepare-sdk] Building sibling SDK at pinned SHA ${PINNED_SDK_SHA}...`);
     execSync("npm ci", { cwd: SIBLING_SDK_DIR, stdio: "inherit", env: cleanEnv });
     execSync("npm run build", { cwd: SIBLING_SDK_DIR, stdio: "inherit", env: cleanEnv });
+  }
+  if (!installedIsSymlink) {
+    if (existsSync(INSTALLED_SDK_DIR)) {
+      rmSync(INSTALLED_SDK_DIR, { recursive: true, force: true });
+    }
+    symlinkSync(SIBLING_SDK_DIR, INSTALLED_SDK_DIR, "dir");
   }
   console.log(`[prepare-sdk] Verified SDK at pinned SHA ${PINNED_SDK_SHA}`);
   process.exit(0);

@@ -12,13 +12,19 @@ import {
   buildNftMintCallTx,
   buildTokenTransferCall,
   buildVaultCreateCall,
+  bytesToHex,
+  concat,
+  decodeContractStateHex,
   deriveAccountsFromMnemonic,
+  deriveStorageSlotHex,
   encodeBincodeBytes32Vec,
   encodeBincodeString,
   encodeBincodeStringVec,
+  estimateContractCall,
   formatAddressForChain,
   generateMnemonic,
   hexToBytes,
+  KovanicaDecodeError,
   runGoldenVectorSelfTest,
   signAndSerializeTransaction,
   validateMnemonic,
@@ -348,6 +354,86 @@ describe("Ecosystem HD Wallet & Wasmi Contract Interoperability (PRO-53, PRO-48)
       for (const step of result.steps) {
         expect(step.passed).toBe(true);
       }
+    });
+  });
+
+  describe("SDK v0.4.0 Fee Estimation & Typed Bincode State Decoders", () => {
+    it("estimates fee, wire size, gas limit, and nonce via estimateContractCall (estimateAndBuildCall)", async () => {
+      const accounts = deriveAccountsFromMnemonic(goldenMnemonic, "", 2, CHAIN_IDS.TESTNET);
+      const contract = hexToBytes("33".repeat(32));
+      const call = buildNameRegisterCallTx(
+        contract,
+        "alice",
+        accounts[1].publicKey,
+        ["https://relay1.kovanica.org"],
+      );
+
+      const mockClient = {
+        estimateFee: async () => 25n,
+        getNonce: async () => 7n,
+      };
+
+      const prepared = await estimateContractCall(mockClient, call, {
+        sender: accounts[0].testnetAddress,
+        chainId: CHAIN_IDS.TESTNET,
+      });
+
+      expect(prepared.nonce).toBe(7n);
+      expect(prepared.feeRatePerByte).toBe(25n);
+      expect(prepared.chainId).toBe(CHAIN_IDS.TESTNET);
+      expect(prepared.gasLimit).toBe(100_000n);
+      expect(prepared.estimatedTxSize).toBeGreaterThan(152);
+
+      // Verify exact fee math (+20% ceil safety margin over feeRatePerByte * estimatedTxSize)
+      const baseFee = 25n * BigInt(prepared.estimatedTxSize);
+      const expectedFee = (baseFee * 12_000n + 9_999n) / 10_000n;
+      expect(prepared.fee).toBe(expectedFee);
+
+      // Verify wire size matches signed transaction byte-for-byte
+      const signed = signAndSerializeTransaction(
+        {
+          sender: accounts[0].publicKey,
+          nonce: prepared.nonce!,
+          kind: call,
+          fee: prepared.fee,
+        },
+        accounts[0].secretKey,
+        CHAIN_IDS.TESTNET,
+      );
+      expect(prepared.estimatedTxSize).toBe(signed.txSize);
+    });
+
+    it("decodes a NameRecord from hex and derives canonical BLAKE3 storage slots", () => {
+      const owner = hexToBytes("aa".repeat(32));
+      const pubkey = hexToBytes("bb".repeat(32));
+      // NameEntry layout: (owner: [u8;32], pubkey: [u8;32], relay_endpoints: Vec<String>)
+      const encoded = concat([
+        owner,
+        pubkey,
+        encodeBincodeStringVec(["https://relay.kovanica.org"]),
+      ]);
+
+      const decoded = decodeContractStateHex("name", `0x${bytesToHex(encoded)}`) as {
+        owner: Uint8Array;
+        ownerHex: string;
+        pubkey: Uint8Array;
+        pubkeyHex: string;
+        relayEndpoints: string[];
+      };
+
+      expect(decoded.owner).toEqual(owner);
+      expect(decoded.ownerHex).toBe("aa".repeat(32));
+      expect(decoded.pubkey).toEqual(pubkey);
+      expect(decoded.pubkeyHex).toBe("bb".repeat(32));
+      expect(decoded.relayEndpoints).toEqual(["https://relay.kovanica.org"]);
+
+      const slotHex = deriveStorageSlotHex("name", "alice");
+      expect(slotHex).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it("fails closed with KovanicaDecodeError on truncated or malformed Bincode input", () => {
+      expect(() => decodeContractStateHex("htlc", "0xdeadbeef")).toThrow(KovanicaDecodeError);
+      expect(() => decodeContractStateHex("name", "0xzzzz")).toThrow(KovanicaDecodeError);
     });
   });
 });

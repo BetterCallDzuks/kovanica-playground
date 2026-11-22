@@ -72,7 +72,7 @@ describe("WsSubscriptionConsole", () => {
     );
   });
 
-  it("connects, subscribes to newHeads & logs with filters, and receives notifications", () => {
+  it("connects, subscribes to newHeads & logs with filters via KovanicaWsClient, and receives notifications", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
@@ -97,7 +97,7 @@ describe("WsSubscriptionConsole", () => {
     expect(ws.url).toBe("ws://127.0.0.1:8545/ws");
     expect(screen.getByTestId("ws-connection-status").textContent).toBe("connecting");
 
-    act(() => {
+    await act(async () => {
       ws.simulateOpen();
     });
     expect(screen.getByTestId("ws-connection-status").textContent).toBe("connected");
@@ -114,7 +114,7 @@ describe("WsSubscriptionConsole", () => {
     });
 
     // Server acknowledges newHeads subscription
-    act(() => {
+    await act(async () => {
       ws.simulateMessage({ jsonrpc: "2.0", id: 1, result: "0xsub-heads" });
     });
     expect(screen.getByTestId("ws-sub-0xsub-heads")).toBeDefined();
@@ -146,13 +146,13 @@ describe("WsSubscriptionConsole", () => {
       ],
     });
 
-    act(() => {
+    await act(async () => {
       ws.simulateMessage({ jsonrpc: "2.0", id: 2, result: "0xsub-logs" });
     });
     expect(screen.getByTestId("ws-sub-0xsub-logs")).toBeDefined();
 
     // Receive notification for newHeads
-    act(() => {
+    await act(async () => {
       ws.simulateMessage({
         jsonrpc: "2.0",
         method: "kovanica_subscription",
@@ -176,7 +176,7 @@ describe("WsSubscriptionConsole", () => {
     expect(screen.getByRole("button", { name: "Copied!" })).toBeDefined();
   });
 
-  it("buffers events while paused and flushes them on resume, honoring maxEvents cap", () => {
+  it("buffers events while paused and flushes them on resume, honoring maxEvents cap", async () => {
     render(
       <WsSubscriptionConsole
         rpcUrl="https://rpc.kovanica.org/rpc"
@@ -189,21 +189,27 @@ describe("WsSubscriptionConsole", () => {
     const ws = MockWebSocket.instances[0];
     expect(ws.url).toBe("wss://rpc.kovanica.org/ws");
 
-    act(() => {
+    await act(async () => {
       ws.simulateOpen();
     });
 
-    // Subscribe to committedLeaders
+    // Subscribe to committedLeaders (KovanicaWsClient sends canonical "newCommittedLeader")
     fireEvent.change(screen.getByLabelText("Subscription Channel"), {
       target: { value: "committedLeaders" },
     });
     fireEvent.click(screen.getByTestId("ws-subscribe-btn"));
-    act(() => {
+    expect(JSON.parse(ws.sentMessages[0])).toEqual({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "kovanica_subscribe",
+      params: ["newCommittedLeader"],
+    });
+    await act(async () => {
       ws.simulateMessage({ jsonrpc: "2.0", id: 1, result: "0xsub-leaders" });
     });
 
     // Push 1 event before pausing
-    act(() => {
+    await act(async () => {
       ws.simulateMessage({
         jsonrpc: "2.0",
         method: "kovanica_subscription",
@@ -218,7 +224,7 @@ describe("WsSubscriptionConsole", () => {
     expect(screen.getByTestId("ws-paused-badge").textContent).toBe("Paused (0 buffered)");
 
     // Push 3 more events while paused
-    act(() => {
+    await act(async () => {
       ws.simulateMessage({
         jsonrpc: "2.0",
         method: "kovanica_subscription",
@@ -256,7 +262,7 @@ describe("WsSubscriptionConsole", () => {
     expect(screen.getByTestId("ws-empty-stream")).toBeDefined();
   });
 
-  it("sends kovanica_unsubscribe and removes subscription upon acknowledgement", () => {
+  it("sends kovanica_unsubscribe and removes subscription upon acknowledgement", async () => {
     render(
       <WsSubscriptionConsole
         rpcUrl="http://127.0.0.1:8545/rpc"
@@ -266,12 +272,12 @@ describe("WsSubscriptionConsole", () => {
 
     fireEvent.click(screen.getByTestId("ws-connect-btn"));
     const ws = MockWebSocket.instances[0];
-    act(() => {
+    await act(async () => {
       ws.simulateOpen();
     });
 
     fireEvent.click(screen.getByTestId("ws-subscribe-btn"));
-    act(() => {
+    await act(async () => {
       ws.simulateMessage({ jsonrpc: "2.0", id: 1, result: "0xsub-99" });
     });
     expect(screen.getByTestId("ws-sub-0xsub-99")).toBeDefined();
@@ -288,13 +294,13 @@ describe("WsSubscriptionConsole", () => {
     });
 
     // Server confirms unsubscribe
-    act(() => {
+    await act(async () => {
       ws.simulateMessage({ jsonrpc: "2.0", id: 2, result: true });
     });
     expect(screen.queryByTestId("ws-sub-0xsub-99")).toBeNull();
   });
 
-  it("cleans up WebSocket connection on Disconnect and on component unmount", () => {
+  it("cleans up WebSocket connection on Disconnect and on component unmount", async () => {
     const { unmount } = render(
       <WsSubscriptionConsole
         rpcUrl="http://127.0.0.1:8545/rpc"
@@ -305,11 +311,11 @@ describe("WsSubscriptionConsole", () => {
     // Connect and subscribe
     fireEvent.click(screen.getByTestId("ws-connect-btn"));
     const ws1 = MockWebSocket.instances[0];
-    act(() => {
+    await act(async () => {
       ws1.simulateOpen();
     });
     fireEvent.click(screen.getByTestId("ws-subscribe-btn"));
-    act(() => {
+    await act(async () => {
       ws1.simulateMessage({ jsonrpc: "2.0", id: 1, result: "0xsub-1" });
     });
     expect(screen.getByTestId("ws-sub-0xsub-1")).toBeDefined();
@@ -323,7 +329,7 @@ describe("WsSubscriptionConsole", () => {
     // Reconnect and then unmount to verify unmount cleanup closes the socket
     fireEvent.click(screen.getByTestId("ws-connect-btn"));
     const ws2 = MockWebSocket.instances[1];
-    act(() => {
+    await act(async () => {
       ws2.simulateOpen();
     });
     expect(ws2.closeCalls).toHaveLength(0);

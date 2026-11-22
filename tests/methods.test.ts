@@ -11,21 +11,26 @@ describe("Immutable SDK Pin & Traceability", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
     const pinnedSha = pkg?.kovanicaSdk?.testedRevision;
 
-    expect(pinnedSha).toBe("83a6495f15e271db9de10d68c1c90d46f9e539d5");
+    expect(pinnedSha).toBe("0de8d1c359fbe98076bb9eb8e122f147c3ab131d");
     expect(pinnedSha).toMatch(/^[0-9a-f]{40}$/);
 
     const ciWorkflow = fs.readFileSync(path.join(rootDir, ".github/workflows/ci.yml"), "utf8");
+    expect(ciWorkflow).toContain("repository: KovanicaProtokol/kovanica-sdk");
     expect(ciWorkflow).toContain(`ref: ${pinnedSha}`);
-    expect(ciWorkflow).not.toMatch(/repository:\s*KovanicaDAG\/kovanica-sdk[\s\S]*?ref:\s*main/);
+    expect(ciWorkflow).not.toContain("KovanicaDAG/kovanica-sdk");
+    expect(ciWorkflow).not.toMatch(/repository:\s*KovanicaProtokol\/kovanica-sdk[\s\S]*?ref:\s*main/);
 
     const installedSdkDir = path.join(rootDir, "node_modules", "kovanica-sdk");
     const distIndexPath = path.join(installedSdkDir, "dist", "index.js");
     expect(fs.existsSync(distIndexPath)).toBe(true);
 
-    // Confirm the compiled bundle includes the SDK #4 transport contract & envelope validation
+    // Confirm the compiled bundle includes the SDK transport contract & v0.4.0 features
     const distContent = fs.readFileSync(distIndexPath, "utf8");
     expect(distContent).toContain("JSON-RPC response ID mismatch");
     expect(distContent).toContain("neither result nor error member present");
+    expect(distContent).toContain("KovanicaWsClient");
+    expect(distContent).toContain("estimateAndBuildCall");
+    expect(distContent).toContain("decodeEscrowRecord");
 
     const markerPath = path.join(installedSdkDir, ".tested-revision");
     if (fs.existsSync(markerPath)) {

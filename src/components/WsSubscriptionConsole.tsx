@@ -1,13 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { KovanicaWsClient, type WsLogFilter } from "kovanica-sdk";
 
 export type SubscriptionChannel = "newHeads" | "committedLeaders" | "logs";
 
 export type WsConnectionState = "disconnected" | "connecting" | "connected" | "error";
 
-export interface LogsFilter {
-  address?: string | string[];
-  topics?: string[];
-}
+export type LogsFilter = WsLogFilter;
 
 export interface ActiveSubscription {
   id: string;
@@ -44,15 +42,6 @@ export interface WsSubscriptionConsoleProps {
 }
 
 export const DEFAULT_MAX_EVENTS = 200;
-
-const WS_OPEN_STATE = 1;
-
-interface PendingRpcRequest {
-  method: "kovanica_subscribe" | "kovanica_unsubscribe";
-  channel?: SubscriptionChannel;
-  filter?: LogsFilter;
-  subscriptionId?: string;
-}
 
 export function deriveWsUrl(rpcUrl: string): string {
   const trimmed = rpcUrl.trim();
@@ -127,11 +116,9 @@ export function WsSubscriptionConsole({
   const [totalReceived, setTotalReceived] = useState<number>(0);
   const [copiedUid, setCopiedUid] = useState<string | null>(null);
 
-  // Mutable refs for socket callbacks
-  const wsRef = useRef<WebSocketLike | null>(null);
-  const rpcIdRef = useRef<number>(1);
+  // Mutable refs for KovanicaWsClient callbacks
+  const wsClientRef = useRef<KovanicaWsClient | null>(null);
   const eventSeqRef = useRef<number>(1);
-  const pendingRequestsRef = useRef<Map<number, PendingRpcRequest>>(new Map());
   const subscriptionsRef = useRef<Map<string, ActiveSubscription>>(new Map());
   const isPausedRef = useRef<boolean>(false);
   const maxEventsRef = useRef<number>(maxEvents);
@@ -151,24 +138,40 @@ export function WsSubscriptionConsole({
     }
   }, [rpcUrl, isUrlEdited]);
 
-  const cleanupSocket = useCallback((closeSocket: boolean) => {
-    const current = wsRef.current;
-    wsRef.current = null;
-    pendingRequestsRef.current.clear();
+  const pushEvent = useCallback(
+    (subscriptionId: string, eventChannel: SubscriptionChannel | "unknown", payload: unknown) => {
+      const entry: WsEventEntry = {
+        uid: `evt-${eventSeqRef.current++}`,
+        receivedAt: new Date().toISOString(),
+        subscriptionId,
+        channel: eventChannel,
+        payload,
+        rawJson: safeFormatJson(payload),
+      };
+
+      setTotalReceived((prev) => prev + 1);
+      const cap = Math.max(1, maxEventsRef.current);
+
+      if (isPausedRef.current) {
+        setBufferedEvents((prev) => [entry, ...prev].slice(0, cap));
+      } else {
+        setEvents((prev) => [entry, ...prev].slice(0, cap));
+      }
+    },
+    [],
+  );
+
+  const cleanupClient = useCallback((closeClient: boolean) => {
+    const current = wsClientRef.current;
+    wsClientRef.current = null;
     subscriptionsRef.current.clear();
     setActiveSubscriptions([]);
 
-    if (current) {
-      current.onopen = null;
-      current.onmessage = null;
-      current.onerror = null;
-      current.onclose = null;
-      if (closeSocket) {
-        try {
-          current.close(1000, "Client disconnected");
-        } catch {
-          // Ignore close errors on already-closing sockets
-        }
+    if (current && closeClient) {
+      try {
+        current.close();
+      } catch {
+        // Ignore close errors on already-closing sockets
       }
     }
   }, []);
@@ -176,16 +179,16 @@ export function WsSubscriptionConsole({
   // Ensure clean disconnect on unmount
   useEffect(() => {
     return () => {
-      cleanupSocket(true);
+      cleanupClient(true);
     };
-  }, [cleanupSocket]);
+  }, [cleanupClient]);
 
   const handleDisconnect = useCallback(() => {
-    cleanupSocket(true);
+    cleanupClient(true);
     setConnectionState("disconnected");
     setStatusMessage("Disconnected");
     setErrorMsg(null);
-  }, [cleanupSocket]);
+  }, [cleanupClient]);
 
   const handleConnect = useCallback(() => {
     const targetUrl = wsUrl.trim();
@@ -203,15 +206,22 @@ export function WsSubscriptionConsole({
       return;
     }
 
-    // Close any prior socket before opening a new one
-    cleanupSocket(true);
+    // Close any prior client before opening a new one
+    cleanupClient(true);
     setErrorMsg(null);
     setStatusMessage(`Connecting to ${targetUrl}...`);
     setConnectionState("connecting");
 
-    let socket: WebSocketLike;
+    let client: KovanicaWsClient;
     try {
-      socket = new SocketCtor(targetUrl);
+      client = new KovanicaWsClient({
+        url: targetUrl,
+        WebSocketImpl: SocketCtor as unknown as typeof WebSocket,
+        onError: (err: Error) => {
+          if (wsClientRef.current !== client) return;
+          setErrorMsg(err.message);
+        },
+      });
     } catch (err: unknown) {
       setConnectionState("error");
       setStatusMessage(null);
@@ -219,124 +229,34 @@ export function WsSubscriptionConsole({
       return;
     }
 
-    wsRef.current = socket;
+    wsClientRef.current = client;
 
-    socket.onopen = () => {
-      if (wsRef.current !== socket) return;
-      setConnectionState("connected");
-      setStatusMessage(`Connected to ${targetUrl}`);
-      setErrorMsg(null);
-    };
-
-    socket.onmessage = (event: { data: unknown }) => {
-      if (wsRef.current !== socket) return;
-
-      const rawText = typeof event.data === "string" ? event.data : String(event.data ?? "");
-      let parsed: Record<string, unknown>;
-      try {
-        parsed = JSON.parse(rawText) as Record<string, unknown>;
-      } catch {
-        setErrorMsg(`Received malformed JSON frame: ${rawText.slice(0, 120)}`);
-        return;
-      }
-
-      // 1. Handle JSON-RPC response to kovanica_subscribe / kovanica_unsubscribe
-      if (typeof parsed.id === "number" && pendingRequestsRef.current.has(parsed.id)) {
-        const pending = pendingRequestsRef.current.get(parsed.id)!;
-        pendingRequestsRef.current.delete(parsed.id);
-
-        if (parsed.error && typeof parsed.error === "object") {
-          const rpcErr = parsed.error as { code?: number; message?: string };
-          setErrorMsg(
-            `${pending.method} failed (${rpcErr.code ?? "RPC"}): ${rpcErr.message ?? "Unknown error"}`,
-          );
-          return;
-        }
-
-        if (pending.method === "kovanica_subscribe") {
-          const subId = typeof parsed.result === "string" ? parsed.result : String(parsed.result ?? "");
-          if (!subId) {
-            setErrorMsg("kovanica_subscribe returned an empty subscription ID.");
-            return;
-          }
-          const sub: ActiveSubscription = {
-            id: subId,
-            channel: pending.channel ?? "newHeads",
-            filter: pending.filter,
-            subscribedAt: new Date().toISOString(),
-          };
-          subscriptionsRef.current.set(subId, sub);
-          setActiveSubscriptions(Array.from(subscriptionsRef.current.values()));
-          setStatusMessage(`Subscribed to ${sub.channel} (${subId})`);
-          setErrorMsg(null);
-          return;
-        }
-
-        if (pending.method === "kovanica_unsubscribe" && pending.subscriptionId) {
-          subscriptionsRef.current.delete(pending.subscriptionId);
-          setActiveSubscriptions(Array.from(subscriptionsRef.current.values()));
-          setStatusMessage(`Unsubscribed ${pending.subscriptionId}`);
-          setErrorMsg(null);
-          return;
-        }
-      }
-
-      // 2. Handle JSON-RPC subscription notification
-      if (
-        typeof parsed.method === "string" &&
-        (parsed.method === "kovanica_subscription" || parsed.method.endsWith("_subscription")) &&
-        parsed.params &&
-        typeof parsed.params === "object"
-      ) {
-        const params = parsed.params as { subscription?: unknown; result?: unknown };
-        const subId = typeof params.subscription === "string" ? params.subscription : String(params.subscription ?? "unknown");
-        const matchedSub = subscriptionsRef.current.get(subId);
-        const entry: WsEventEntry = {
-          uid: `evt-${eventSeqRef.current++}`,
-          receivedAt: new Date().toISOString(),
-          subscriptionId: subId,
-          channel: matchedSub?.channel ?? "unknown",
-          payload: params.result,
-          rawJson: safeFormatJson(params.result),
-        };
-
-        setTotalReceived((prev) => prev + 1);
-        const cap = Math.max(1, maxEventsRef.current);
-
-        if (isPausedRef.current) {
-          setBufferedEvents((prev) => [entry, ...prev].slice(0, cap));
-        } else {
-          setEvents((prev) => [entry, ...prev].slice(0, cap));
-        }
-      }
-    };
-
-    socket.onerror = () => {
-      if (wsRef.current !== socket) return;
-      setConnectionState("error");
-      setErrorMsg(`WebSocket transport error on ${targetUrl}`);
-    };
-
-    socket.onclose = (ev: { code?: number; reason?: string }) => {
-      if (wsRef.current !== socket) return;
-      wsRef.current = null;
-      pendingRequestsRef.current.clear();
-      subscriptionsRef.current.clear();
-      setActiveSubscriptions([]);
-      setConnectionState("disconnected");
-      const detail = ev?.reason ? ` (${ev.reason})` : ev?.code ? ` (code ${ev.code})` : "";
-      setStatusMessage(`Connection closed${detail}`);
-    };
-  }, [wsUrl, WebSocketImpl, cleanupSocket]);
+    void client
+      .connect()
+      .then(() => {
+        if (wsClientRef.current !== client) return;
+        setConnectionState("connected");
+        setStatusMessage(`Connected to ${targetUrl}`);
+        setErrorMsg(null);
+      })
+      .catch((err: unknown) => {
+        if (wsClientRef.current !== client) return;
+        wsClientRef.current = null;
+        subscriptionsRef.current.clear();
+        setActiveSubscriptions([]);
+        setConnectionState("error");
+        setStatusMessage(null);
+        setErrorMsg(err instanceof Error ? err.message : String(err));
+      });
+  }, [wsUrl, WebSocketImpl, cleanupClient]);
 
   const handleSubscribe = useCallback(() => {
-    const socket = wsRef.current;
-    if (!socket || connectionState !== "connected" || socket.readyState !== WS_OPEN_STATE) {
+    const client = wsClientRef.current;
+    if (!client || connectionState !== "connected" || !client.isConnected) {
       setErrorMsg("Connect to a WebSocket endpoint before subscribing.");
       return;
     }
 
-    const params: unknown[] = [channel];
     let filter: LogsFilter | undefined;
 
     if (channel === "logs") {
@@ -361,63 +281,73 @@ export function WsSubscriptionConsole({
 
       if (logFilter.address !== undefined || logFilter.topics !== undefined) {
         filter = logFilter;
-        params.push(logFilter);
       }
     }
 
-    const id = rpcIdRef.current++;
-    pendingRequestsRef.current.set(id, {
-      method: "kovanica_subscribe",
-      channel,
-      filter,
-    });
+    setErrorMsg(null);
+    setStatusMessage(`Subscribing to ${channel}...`);
 
-    try {
-      socket.send(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          id,
-          method: "kovanica_subscribe",
-          params,
-        }),
-      );
-      setErrorMsg(null);
-      setStatusMessage(`Subscribing to ${channel}...`);
-    } catch (err: unknown) {
-      pendingRequestsRef.current.delete(id);
-      setErrorMsg(err instanceof Error ? err.message : String(err));
-    }
-  }, [channel, connectionState, logAddressInput, logTopicsInput]);
+    const subChannel = channel;
+    const subFilter = filter;
+    let resolvedSubId = "pending";
+
+    const onNotification = (payload: unknown) => {
+      if (wsClientRef.current !== client) return;
+      pushEvent(resolvedSubId, subChannel, payload);
+    };
+
+    const subscribePromise =
+      subChannel === "newHeads"
+        ? client.subscribeNewHeads(onNotification)
+        : subChannel === "committedLeaders"
+          ? client.subscribeCommittedLeaders(onNotification)
+          : client.subscribeLogs(subFilter, onNotification);
+
+    void subscribePromise
+      .then((subId) => {
+        if (wsClientRef.current !== client) return;
+        resolvedSubId = subId;
+        const sub: ActiveSubscription = {
+          id: subId,
+          channel: subChannel,
+          filter: subFilter,
+          subscribedAt: new Date().toISOString(),
+        };
+        subscriptionsRef.current.set(subId, sub);
+        setActiveSubscriptions(Array.from(subscriptionsRef.current.values()));
+        setStatusMessage(`Subscribed to ${sub.channel} (${subId})`);
+        setErrorMsg(null);
+      })
+      .catch((err: unknown) => {
+        if (wsClientRef.current !== client) return;
+        setErrorMsg(err instanceof Error ? err.message : String(err));
+      });
+  }, [channel, connectionState, logAddressInput, logTopicsInput, pushEvent]);
 
   const handleUnsubscribe = useCallback(
     (subscriptionId: string) => {
-      const socket = wsRef.current;
-      if (!socket || connectionState !== "connected" || socket.readyState !== WS_OPEN_STATE) {
+      const client = wsClientRef.current;
+      if (!client || connectionState !== "connected" || !client.isConnected) {
         setErrorMsg("WebSocket is not connected.");
         return;
       }
 
-      const id = rpcIdRef.current++;
-      pendingRequestsRef.current.set(id, {
-        method: "kovanica_unsubscribe",
-        subscriptionId,
-      });
+      setErrorMsg(null);
+      setStatusMessage(`Unsubscribing ${subscriptionId}...`);
 
-      try {
-        socket.send(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            id,
-            method: "kovanica_unsubscribe",
-            params: [subscriptionId],
-          }),
-        );
-        setErrorMsg(null);
-        setStatusMessage(`Unsubscribing ${subscriptionId}...`);
-      } catch (err: unknown) {
-        pendingRequestsRef.current.delete(id);
-        setErrorMsg(err instanceof Error ? err.message : String(err));
-      }
+      void client
+        .unsubscribe(subscriptionId)
+        .then(() => {
+          if (wsClientRef.current !== client) return;
+          subscriptionsRef.current.delete(subscriptionId);
+          setActiveSubscriptions(Array.from(subscriptionsRef.current.values()));
+          setStatusMessage(`Unsubscribed ${subscriptionId}`);
+          setErrorMsg(null);
+        })
+        .catch((err: unknown) => {
+          if (wsClientRef.current !== client) return;
+          setErrorMsg(err instanceof Error ? err.message : String(err));
+        });
     },
     [connectionState],
   );
