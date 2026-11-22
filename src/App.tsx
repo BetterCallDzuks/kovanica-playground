@@ -14,6 +14,7 @@ import {
   validateParam,
 } from "./methods";
 import { WalletContractConsole } from "./components/WalletContractConsole";
+import { WsSubscriptionConsole } from "./components/WsSubscriptionConsole";
 
 // Safe JSON serializer that handles BigInt without throwing
 function formatJson(data: unknown): string {
@@ -36,7 +37,7 @@ export default function App() {
   // Target Network & Endpoint
   const [selectedChainId, setSelectedChainId] = useState<number>(CHAIN_IDS.TESTNET);
   const [rpcUrl, setRpcUrl] = useState<string>("http://127.0.0.1:8545/rpc");
-  const [mainTab, setMainTab] = useState<"rpc" | "wallet">("rpc");
+  const [mainTab, setMainTab] = useState<"rpc" | "wallet" | "ws">("rpc");
   const [connectedNodeChainId, setConnectedNodeChainId] = useState<number | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [miningInfo, setMiningInfo] = useState<MiningInfo | null>(null);
@@ -609,11 +610,28 @@ export default function App() {
           >
             HD Wallet & Wasmi Contracts (PRO-53 / PRO-48)
           </button>
+          <button
+            type="button"
+            data-testid="tab-ws-stream"
+            onClick={() => setMainTab("ws")}
+            className={`px-4 py-2 text-xs font-semibold rounded-lg transition-colors ${
+              mainTab === "ws"
+                ? "bg-gold text-bg font-bold shadow-sm"
+                : "bg-surface text-muted hover:text-fg border border-border"
+            }`}
+          >
+            WebSocket Event Stream
+          </button>
         </div>
 
         {/* HD Wallet & Wasmi Contract Console (PRO-53 & PRO-48) */}
         <div className={mainTab === "wallet" ? "block" : "hidden"}>
           <WalletContractConsole client={client} selectedChainId={selectedChainId} />
+        </div>
+
+        {/* WebSocket Event Stream Console */}
+        <div className={mainTab === "ws" ? "block" : "hidden"}>
+          <WsSubscriptionConsole rpcUrl={rpcUrl} />
         </div>
 
         {/* Multi-Column Layout (RPC Explorer & Node Diagnostics) */}
