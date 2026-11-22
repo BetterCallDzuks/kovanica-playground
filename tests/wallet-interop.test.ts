@@ -16,17 +16,24 @@ import {
   concat,
   decodeContractStateHex,
   deriveAccountsFromMnemonic,
+  deriveContractStorageSlotHex,
+  derivePrefixedStorageSlot,
   deriveStorageSlotHex,
   encodeBincodeBytes32Vec,
   encodeBincodeString,
   encodeBincodeStringVec,
   estimateContractCall,
+  fetchAndDecodeContractStorageSlot,
   formatAddressForChain,
   generateMnemonic,
   hexToBytes,
+  isStorageSlotEmpty,
   KovanicaDecodeError,
   runGoldenVectorSelfTest,
   signAndSerializeTransaction,
+  u128le,
+  u32le,
+  u64le,
   validateMnemonic,
   type UnsignedTx,
 } from "../src/wallet-interop";
@@ -434,6 +441,291 @@ describe("Ecosystem HD Wallet & Wasmi Contract Interoperability (PRO-53, PRO-48)
     it("fails closed with KovanicaDecodeError on truncated or malformed Bincode input", () => {
       expect(() => decodeContractStateHex("htlc", "0xdeadbeef")).toThrow(KovanicaDecodeError);
       expect(() => decodeContractStateHex("name", "0xzzzz")).toThrow(KovanicaDecodeError);
+    });
+
+    it("derives canonical BLAKE3 storage slots across all contract types and custom prefixes", () => {
+      const id32Hex = "ab".repeat(32);
+
+      // Canonical record types
+      expect(deriveContractStorageSlotHex({ kind: "name", key: "Alice" })).toBe(
+        deriveStorageSlotHex("name", "alice"),
+      );
+      expect(deriveContractStorageSlotHex({ kind: "htlc", key: id32Hex })).toBe(
+        deriveStorageSlotHex("htlc", id32Hex),
+      );
+      expect(deriveContractStorageSlotHex({ kind: "escrow", key: id32Hex })).toBe(
+        deriveStorageSlotHex("escrow", id32Hex),
+      );
+      expect(deriveContractStorageSlotHex({ kind: "vault", key: id32Hex })).toBe(
+        deriveStorageSlotHex("vault", id32Hex),
+      );
+      expect(deriveContractStorageSlotHex({ kind: "token_metadata" })).toBe(
+        deriveStorageSlotHex("token"),
+      );
+      expect(deriveContractStorageSlotHex({ kind: "nft_metadata" })).toBe(
+        deriveStorageSlotHex("nft"),
+      );
+      expect(deriveContractStorageSlotHex({ kind: "multisig" })).toBe(
+        deriveStorageSlotHex("multisig"),
+      );
+
+      // Custom prefix + key via derivePrefixedStorageSlot
+      const customNameSlot = deriveContractStorageSlotHex({
+        kind: "name",
+        customPrefix: "kvnc/v1/name/",
+        key: "alice",
+      });
+      expect(customNameSlot).toBe(
+        bytesToHex(derivePrefixedStorageSlot("kvnc/v1/name/", "alice")),
+      );
+      expect(customNameSlot).toBe(deriveStorageSlotHex("name", "alice"));
+
+      // Custom prefix with 32-byte hex key
+      const customHtlcSlot = deriveContractStorageSlotHex({
+        kind: "htlc",
+        customPrefix: "kvnc/v1/htlc/",
+        key: `0x${id32Hex}`,
+      });
+      expect(customHtlcSlot).toBe(
+        bytesToHex(derivePrefixedStorageSlot("kvnc/v1/htlc/", hexToBytes(id32Hex))),
+      );
+      expect(customHtlcSlot).toBe(deriveStorageSlotHex("htlc", id32Hex));
+
+      // Custom singleton prefix without key
+      const customSingletonSlot = deriveContractStorageSlotHex({
+        kind: "token_metadata",
+        customPrefix: "kvnc/v1/pool",
+        key: "",
+      });
+      expect(customSingletonSlot).toBe(
+        bytesToHex(derivePrefixedStorageSlot("kvnc/v1/pool")),
+      );
+    });
+
+    it("fetches and decodes live contract storage slots across all 7 decoder types via kovanica_getStorageAt", async () => {
+      const contractAddress = "0x" + "33".repeat(32);
+      const pkA = hexToBytes("aa".repeat(32));
+      const pkB = hexToBytes("bb".repeat(32));
+
+      // 1. NameRecord
+      const nameBytes = concat([
+        pkA,
+        pkB,
+        encodeBincodeStringVec(["https://relay1.kovanica.org"]),
+      ]);
+      const expectedNameSlot = deriveStorageSlotHex("name", "alice");
+      let capturedAddr = "";
+      let capturedSlot = "";
+
+      const nameRes = await fetchAndDecodeContractStorageSlot(
+        {
+          getStorageAt: async (addr, slot) => {
+            capturedAddr = addr;
+            capturedSlot = slot;
+            return `0x${bytesToHex(nameBytes)}`;
+          },
+        },
+        {
+          contractAddress,
+          kind: "name",
+          key: "alice",
+        },
+      );
+      expect(capturedAddr).toBe(contractAddress);
+      expect(capturedSlot).toBe(`0x${expectedNameSlot}`);
+      expect(nameRes.slotHex).toBe(expectedNameSlot);
+      expect(nameRes.isEmpty).toBe(false);
+      expect(nameRes.rawStorageHex).toBe(`0x${bytesToHex(nameBytes)}`);
+      expect((nameRes.decoded as any).ownerHex).toBe("aa".repeat(32));
+      expect((nameRes.decoded as any).relayEndpoints).toEqual(["https://relay1.kovanica.org"]);
+
+      // 2. HtlcRecord (via fallback client.call("kovanica_getStorageAt", ...))
+      const hashLock = hexToBytes("cc".repeat(32));
+      const htlcBytes = concat([
+        pkA,
+        pkB,
+        u128le(500_000_000n),
+        hashLock,
+        u64le(1750000000n),
+        Uint8Array.of(1), // claimed = true
+        Uint8Array.of(0), // refunded = false
+      ]);
+      const htlcIdHex = "11".repeat(32);
+      const htlcRes = await fetchAndDecodeContractStorageSlot(
+        {
+          call: async (method, params) => {
+            expect(method).toBe("kovanica_getStorageAt");
+            expect(params).toEqual([
+              contractAddress,
+              `0x${deriveStorageSlotHex("htlc", htlcIdHex)}`,
+            ]);
+            return `0x${bytesToHex(htlcBytes)}` as any;
+          },
+        },
+        {
+          contractAddress,
+          kind: "htlc",
+          key: htlcIdHex,
+        },
+      );
+      expect(htlcRes.isEmpty).toBe(false);
+      expect((htlcRes.decoded as any).amount).toBe(500_000_000n);
+      expect((htlcRes.decoded as any).status).toBe("claimed");
+
+      // 3. EscrowRecord
+      const escrowIdHex = "22".repeat(32);
+      const escrowBytes = concat([
+        pkA,
+        encodeBincodeBytes32Vec([pkA, pkB]),
+        Uint8Array.of(2),
+        encodeBincodeBytes32Vec([pkA]),
+        u128le(1_000_000_000n),
+        u64le(1760000000n),
+        Uint8Array.of(0),
+        Uint8Array.of(0),
+      ]);
+      const escrowRes = await fetchAndDecodeContractStorageSlot(
+        { getStorageAt: async () => `0x${bytesToHex(escrowBytes)}` },
+        { contractAddress, kind: "escrow", key: escrowIdHex },
+      );
+      expect(escrowRes.isEmpty).toBe(false);
+      expect((escrowRes.decoded as any).threshold).toBe(2);
+      expect((escrowRes.decoded as any).status).toBe("open");
+
+      // 4. VaultRecord (Absolute schedule variant 0)
+      const vaultIdHex = "44".repeat(32);
+      const vaultBytes = concat([
+        pkA,
+        pkB,
+        u128le(10_000_000_000n),
+        u128le(2_000_000_000n),
+        u32le(0),
+        u64le(1800000000n),
+        Uint8Array.of(0),
+      ]);
+      const vaultRes = await fetchAndDecodeContractStorageSlot(
+        { getStorageAt: async () => `0x${bytesToHex(vaultBytes)}` },
+        { contractAddress, kind: "vault", key: vaultIdHex },
+      );
+      expect(vaultRes.isEmpty).toBe(false);
+      expect((vaultRes.decoded as any).totalAmount).toBe(10_000_000_000n);
+      expect((vaultRes.decoded as any).schedule).toEqual({
+        kind: "absolute",
+        unlockAt: 1800000000n,
+      });
+
+      // 5. TokenMetadata
+      const tokenBytes = concat([
+        encodeBincodeString("Kovanica USD"),
+        encodeBincodeString("KUSD"),
+        Uint8Array.of(6),
+        u128le(1_000_000_000_000n),
+        pkA,
+        pkB,
+        u64le(0n), // balances count
+        u64le(0n), // allowances count
+        Uint8Array.of(0), // paused = false
+        encodeBincodeString("https://kovanica.network/kusd.svg"),
+      ]);
+      const tokenRes = await fetchAndDecodeContractStorageSlot(
+        { getStorageAt: async () => `0x${bytesToHex(tokenBytes)}` },
+        { contractAddress, kind: "token_metadata" },
+      );
+      expect(tokenRes.slotHex).toBe(deriveStorageSlotHex("token"));
+      expect((tokenRes.decoded as any).symbol).toBe("KUSD");
+      expect((tokenRes.decoded as any).decimals).toBe(6);
+
+      // 6. NftMetadata
+      const nftBytes = concat([
+        encodeBincodeString("Kovanica Artifacts"),
+        encodeBincodeString("KART"),
+        encodeBincodeString("ipfs://base/"),
+        pkA,
+        pkB,
+        u64le(0n), // tokens count
+      ]);
+      const nftRes = await fetchAndDecodeContractStorageSlot(
+        { getStorageAt: async () => `0x${bytesToHex(nftBytes)}` },
+        { contractAddress, kind: "nft_metadata" },
+      );
+      expect(nftRes.slotHex).toBe(deriveStorageSlotHex("nft"));
+      expect((nftRes.decoded as any).name).toBe("Kovanica Artifacts");
+
+      // 7. MultisigState
+      const multisigBytes = concat([
+        encodeBincodeBytes32Vec([pkA, pkB]),
+        u32le(2),
+        u64le(5n),
+      ]);
+      const multisigRes = await fetchAndDecodeContractStorageSlot(
+        { getStorageAt: async () => `0x${bytesToHex(multisigBytes)}` },
+        { contractAddress, kind: "multisig" },
+      );
+      expect(multisigRes.slotHex).toBe(deriveStorageSlotHex("multisig"));
+      expect((multisigRes.decoded as any).threshold).toBe(2);
+      expect((multisigRes.decoded as any).nextTxId).toBe(5n);
+    });
+
+    it("handles empty, null, or uninitialized storage slots gracefully without throwing decode errors", async () => {
+      const contractAddress = "0x" + "33".repeat(32);
+
+      expect(isStorageSlotEmpty(null)).toBe(true);
+      expect(isStorageSlotEmpty(undefined)).toBe(true);
+      expect(isStorageSlotEmpty("")).toBe(true);
+      expect(isStorageSlotEmpty("0x")).toBe(true);
+      expect(isStorageSlotEmpty("0x0")).toBe(true);
+      expect(isStorageSlotEmpty("0x" + "00".repeat(32))).toBe(true);
+      expect(isStorageSlotEmpty("0x01")).toBe(false);
+
+      for (const emptyRaw of [null, undefined, "", "0x", "0x0", "0x" + "00".repeat(32)]) {
+        const res = await fetchAndDecodeContractStorageSlot(
+          { getStorageAt: async () => emptyRaw },
+          { contractAddress, kind: "name", key: "nonexistent" },
+        );
+        expect(res.isEmpty).toBe(true);
+        expect(res.decoded).toBeNull();
+        expect(res.slotHex).toBe(deriveStorageSlotHex("name", "nonexistent"));
+      }
+    });
+
+    it("surfaces RPC errors and KovanicaDecodeError on invalid inputs or malformed storage bytes", async () => {
+      const contractAddress = "0x" + "33".repeat(32);
+
+      // Missing contract address
+      await expect(
+        fetchAndDecodeContractStorageSlot(
+          { getStorageAt: async () => "0x" },
+          { contractAddress: "   ", kind: "name", key: "alice" },
+        ),
+      ).rejects.toThrow(KovanicaDecodeError);
+
+      // Invalid slot key (e.g., htlc requires 32-byte key)
+      await expect(
+        fetchAndDecodeContractStorageSlot(
+          { getStorageAt: async () => "0x" },
+          { contractAddress, kind: "htlc", key: "not-32-bytes" },
+        ),
+      ).rejects.toThrow(KovanicaDecodeError);
+
+      // Malformed / truncated Bincode storage payload returned by RPC
+      await expect(
+        fetchAndDecodeContractStorageSlot(
+          { getStorageAt: async () => "0xdeadbeef" },
+          { contractAddress, kind: "htlc", key: "11".repeat(32) },
+        ),
+      ).rejects.toThrow(KovanicaDecodeError);
+
+      // Transport / RPC error propagation
+      await expect(
+        fetchAndDecodeContractStorageSlot(
+          {
+            getStorageAt: async () => {
+              throw new Error("RPC -32000: storage backend unavailable");
+            },
+          },
+          { contractAddress, kind: "name", key: "alice" },
+        ),
+      ).rejects.toThrow(/RPC -32000: storage backend unavailable/);
     });
   });
 });

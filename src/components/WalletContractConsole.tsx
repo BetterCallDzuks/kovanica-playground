@@ -13,8 +13,9 @@ import {
   buildVaultCreateCall,
   decodeContractStateHex,
   deriveAccountsFromMnemonic,
-  deriveStorageSlotHex,
+  deriveContractStorageSlotHex,
   estimateContractCall,
+  fetchAndDecodeContractStorageSlot,
   generateMnemonic,
   hexToBytes,
   KovanicaDecodeError,
@@ -113,13 +114,17 @@ export function WalletContractConsole({ client, selectedChainId }: Props) {
   const [isEstimating, setIsEstimating] = useState<boolean>(false);
   const [preparedEstimate, setPreparedEstimate] = useState<PreparedCallTransaction | null>(null);
 
-  // SDK v0.4.0 Contract State Bincode Decoder state
+  // SDK v0.4.0 Contract State Bincode Decoder & Live Storage Slot Fetch state
   const [decoderKind, setDecoderKind] = useState<ContractDecoderKind>("name");
+  const [storageContractAddr, setStorageContractAddr] = useState<string>("0x" + "33".repeat(32));
+  const [customSlotPrefix, setCustomSlotPrefix] = useState<string>("");
+  const [slotKeyInput, setSlotKeyInput] = useState<string>("alice");
+  const [derivedSlotHex, setDerivedSlotHex] = useState<string | null>(null);
   const [decoderHexInput, setDecoderHexInput] = useState<string>("");
   const [decodedOutput, setDecodedOutput] = useState<string | null>(null);
   const [decoderError, setDecoderError] = useState<string | null>(null);
-  const [slotKeyInput, setSlotKeyInput] = useState<string>("alice");
-  const [derivedSlotHex, setDerivedSlotHex] = useState<string | null>(null);
+  const [storageEmptyMsg, setStorageEmptyMsg] = useState<string | null>(null);
+  const [isFetchingStorage, setIsFetchingStorage] = useState<boolean>(false);
 
   // Self-test results
   const [selfTestSteps, setSelfTestSteps] = useState<SelfTestStep[] | null>(null);
@@ -273,6 +278,7 @@ export function WalletContractConsole({ client, selectedChainId }: Props) {
   const handleDecodeState = () => {
     setDecoderError(null);
     setDecodedOutput(null);
+    setStorageEmptyMsg(null);
     try {
       const decoded = decodeContractStateHex(decoderKind, decoderHexInput.trim());
       setDecodedOutput(
@@ -295,20 +301,60 @@ export function WalletContractConsole({ client, selectedChainId }: Props) {
 
   const handleDeriveSlot = () => {
     setDecoderError(null);
+    setStorageEmptyMsg(null);
     try {
-      const slot =
-        decoderKind === "name"
-          ? deriveStorageSlotHex("name", slotKeyInput.trim())
-          : decoderKind === "htlc"
-            ? deriveStorageSlotHex("htlc", slotKeyInput.trim())
-            : decoderKind === "escrow"
-              ? deriveStorageSlotHex("escrow", BigInt(slotKeyInput.trim() || "0"))
-              : decoderKind === "vault"
-                ? deriveStorageSlotHex("vault", BigInt(slotKeyInput.trim() || "0"))
-                : deriveStorageSlotHex("state");
+      const slot = deriveContractStorageSlotHex({
+        kind: decoderKind,
+        key: slotKeyInput,
+        customPrefix: customSlotPrefix,
+      });
       setDerivedSlotHex(slot);
     } catch (err: unknown) {
-      setDecoderError(err instanceof Error ? err.message : String(err));
+      if (err instanceof KovanicaDecodeError) {
+        setDecoderError(`[${err.code}] ${err.message}`);
+      } else {
+        setDecoderError(err instanceof Error ? err.message : String(err));
+      }
+    }
+  };
+
+  const handleFetchAndDecodeStorage = async () => {
+    setDecoderError(null);
+    setDecodedOutput(null);
+    setStorageEmptyMsg(null);
+    setIsFetchingStorage(true);
+    try {
+      const result = await fetchAndDecodeContractStorageSlot(client, {
+        contractAddress: storageContractAddr,
+        kind: decoderKind,
+        key: slotKeyInput,
+        customPrefix: customSlotPrefix,
+      });
+      setDerivedSlotHex(result.slotHex);
+      setDecoderHexInput(result.rawStorageHex);
+      if (result.isEmpty) {
+        setStorageEmptyMsg(
+          `Storage slot 0x${result.slotHex} is empty (${result.rawStorageHex}) on contract ${result.contractAddress}.`,
+        );
+      } else {
+        setDecodedOutput(
+          JSON.stringify(
+            result.decoded,
+            (_key, value) => (typeof value === "bigint" ? value.toString() : value),
+            2,
+          ),
+        );
+      }
+    } catch (err: unknown) {
+      if (err instanceof KovanicaDecodeError) {
+        setDecoderError(
+          `[${err.code}${err.offset !== undefined ? ` @ byte ${err.offset}` : ""}] ${err.message}`,
+        );
+      } else {
+        setDecoderError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      setIsFetchingStorage(false);
     }
   };
 
@@ -1094,7 +1140,7 @@ export function WalletContractConsole({ client, selectedChainId }: Props) {
         )}
       </div>
 
-      {/* SDK v0.4.0 Contract State Bincode Decoder */}
+      {/* SDK v0.4.0 Contract State Bincode Decoder & Live Storage Slot Fetch */}
       <div className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-4" data-testid="bincode-decoder-panel">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
           <div>
@@ -1102,59 +1148,109 @@ export function WalletContractConsole({ client, selectedChainId }: Props) {
               Contract State Bincode Decoder (SDK v0.4.0)
             </h2>
             <p className="text-xs text-muted">
-              Decode raw hex storage values returned by <code className="font-mono text-fg">kovanica_getStorageAt</code> or derive canonical BLAKE3 storage slots
+              Live Storage Slot Fetch (<code className="font-mono text-fg">kovanica_getStorageAt</code>), canonical BLAKE3 slot derivation, and typed Bincode 1.x decoding
             </p>
+          </div>
+          <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-surface-2 border border-border text-gold">
+            kovanica_getStorageAt
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label htmlFor="storage-contract-address" className="block text-xs font-medium text-muted mb-1">
+              Contract Address (PRO-21 <code className="font-mono">kvnc...dag</code> / <code className="font-mono">tknc...dag</code> or 32-byte hex)
+            </label>
+            <input
+              id="storage-contract-address"
+              data-testid="storage-contract-address"
+              type="text"
+              value={storageContractAddr}
+              onChange={(e) => setStorageContractAddr(e.target.value)}
+              placeholder="kvnc...dag or 0x..."
+              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+            />
+          </div>
+
+          <div>
+            <label htmlFor="decoder-kind-select" className="block text-xs font-medium text-muted mb-1">
+              Contract Record Type & Typed Decoder
+            </label>
+            <select
+              id="decoder-kind-select"
+              data-testid="decoder-kind-select"
+              value={decoderKind}
+              onChange={(e) => setDecoderKind(e.target.value as ContractDecoderKind)}
+              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+            >
+              <option value="name">NameRecord — decodeNameRecord (kvnc/v1/name/)</option>
+              <option value="htlc">HtlcRecord — decodeHtlcRecord (kvnc/v1/htlc/)</option>
+              <option value="escrow">EscrowRecord — decodeEscrowRecord (kvnc/v1/escrow/)</option>
+              <option value="vault">VaultRecord — decodeVaultRecord (kvnc/v1/vault/)</option>
+              <option value="token_metadata">TokenMetadata — decodeTokenMetadata (kvnc/v1/state)</option>
+              <option value="nft_metadata">NftMetadata — decodeNftMetadata (kvnc/v1/state)</option>
+              <option value="multisig">MultisigState — decodeMultisigState (kvnc/v1/state)</option>
+            </select>
           </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <div>
-            <label htmlFor="decoder-kind-select" className="block text-xs font-medium text-muted mb-1">
-              Contract Record Type
+            <label htmlFor="decoder-custom-prefix" className="block text-xs font-medium text-muted mb-1">
+              Custom Storage Prefix (optional override)
             </label>
-            <select
-              id="decoder-kind-select"
-              value={decoderKind}
-              onChange={(e) => setDecoderKind(e.target.value as ContractDecoderKind)}
+            <input
+              id="decoder-custom-prefix"
+              data-testid="decoder-custom-prefix"
+              type="text"
+              value={customSlotPrefix}
+              onChange={(e) => setCustomSlotPrefix(e.target.value)}
+              placeholder="e.g. kvnc/v1/name/ (defaults to record prefix)"
               className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-            >
-              <option value="name">NameRecord (kvnc/v1/name/)</option>
-              <option value="htlc">HtlcRecord (kvnc/v1/htlc/)</option>
-              <option value="escrow">EscrowRecord (kvnc/v1/escrow/)</option>
-              <option value="vault">VaultRecord (kvnc/v1/vault/)</option>
-              <option value="token_metadata">TokenMetadata (kvnc/v1/state)</option>
-              <option value="nft_metadata">NftMetadata (kvnc/v1/state)</option>
-              <option value="multisig">MultisigState (kvnc/v1/state)</option>
-            </select>
+            />
           </div>
 
-          <div className="md:col-span-2 flex items-end gap-2">
-            <div className="flex-1">
+          <div className="md:col-span-2 flex flex-wrap items-end gap-2">
+            <div className="flex-1 min-w-[180px]">
               <label htmlFor="decoder-slot-key" className="block text-xs font-medium text-muted mb-1">
-                Storage Slot Key (name / id / hex hashlock)
+                Storage Slot Key (name / 32-byte hex ID; ignored for singleton <code className="font-mono">kvnc/v1/state</code> unless custom prefix set)
               </label>
               <input
                 id="decoder-slot-key"
+                data-testid="decoder-slot-key"
                 type="text"
                 value={slotKeyInput}
                 onChange={(e) => setSlotKeyInput(e.target.value)}
-                placeholder="alice, 0, or 64-char hex"
+                placeholder="alice or 64-char hex ID"
                 className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
               />
             </div>
             <button
               type="button"
+              data-testid="derive-slot-btn"
               onClick={handleDeriveSlot}
               className="px-3 py-2 bg-surface-2 hover:bg-border border border-border rounded-lg text-xs text-fg font-medium whitespace-nowrap transition-colors"
             >
               Derive Slot
             </button>
+            <button
+              type="button"
+              data-testid="fetch-storage-slot-btn"
+              onClick={handleFetchAndDecodeStorage}
+              disabled={isFetchingStorage}
+              className="px-3.5 py-2 bg-gold hover:bg-gold/90 text-bg rounded-lg text-xs font-semibold whitespace-nowrap transition-colors disabled:opacity-50"
+            >
+              {isFetchingStorage ? "Fetching Storage..." : "Live Fetch & Decode (kovanica_getStorageAt)"}
+            </button>
           </div>
         </div>
 
         {derivedSlotHex && (
-          <div className="bg-surface-2/80 border border-border rounded-lg px-3 py-2 text-xs font-mono text-emerald-400 break-all">
-            Slot: {derivedSlotHex}
+          <div
+            data-testid="derived-slot-hex"
+            className="bg-surface-2/80 border border-border rounded-lg px-3 py-2 text-xs font-mono text-emerald-400 break-all"
+          >
+            Derived BLAKE3 Slot (32B): 0x{derivedSlotHex}
           </div>
         )}
 
@@ -1164,6 +1260,7 @@ export function WalletContractConsole({ client, selectedChainId }: Props) {
           </label>
           <textarea
             id="decoder-hex-input"
+            data-testid="decoder-hex-input"
             rows={2}
             value={decoderHexInput}
             onChange={(e) => setDecoderHexInput(e.target.value)}
@@ -1172,22 +1269,40 @@ export function WalletContractConsole({ client, selectedChainId }: Props) {
           />
         </div>
 
-        <button
-          type="button"
-          onClick={handleDecodeState}
-          className="px-4 py-2 bg-gold/20 hover:bg-gold/30 rounded-lg border border-gold/40 text-gold text-xs font-semibold transition-colors self-start"
-        >
-          Decode Bincode State
-        </button>
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            data-testid="decode-bincode-btn"
+            onClick={handleDecodeState}
+            className="px-4 py-2 bg-gold/20 hover:bg-gold/30 rounded-lg border border-gold/40 text-gold text-xs font-semibold transition-colors"
+          >
+            Decode Bincode State
+          </button>
+        </div>
+
+        {storageEmptyMsg && (
+          <div
+            data-testid="storage-empty-msg"
+            className="text-xs font-mono text-amber-300 bg-amber-950/30 border border-amber-800/50 rounded-lg p-3"
+          >
+            {storageEmptyMsg}
+          </div>
+        )}
 
         {decoderError && (
-          <div className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3">
+          <div
+            data-testid="decoder-error-msg"
+            className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3"
+          >
             {decoderError}
           </div>
         )}
 
         {decodedOutput && (
-          <pre className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto">
+          <pre
+            data-testid="decoded-json-output"
+            className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto"
+          >
             {decodedOutput}
           </pre>
         )}
