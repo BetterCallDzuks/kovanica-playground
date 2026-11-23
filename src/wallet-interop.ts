@@ -19,6 +19,7 @@ import {
   decodeTransactionReceiptLogs,
   decodeVaultRecord,
   DEFAULT_IDEMPOTENT_RPC_METHODS,
+  DEFAULT_LOG_HISTORY_CHUNK_SIZE,
   deriveBip44,
   derivePrefixedStorageSlot,
   deriveStorageSlotHex,
@@ -29,6 +30,7 @@ import {
   estimateBatchCalls,
   estimateCallTxSize,
   formatBip44Path,
+  getContractLogHistory,
   getPublicKey,
   HtlcClient,
   KOVANICA_COIN_TYPE,
@@ -38,6 +40,7 @@ import {
   NameRegistryClient,
   NftClient,
   readContractStorage,
+  subscribeContractEvents,
   TESTNET_ADDRESS_PREFIX,
   TokenClient,
   toHexQuantity,
@@ -45,11 +48,15 @@ import {
   waitForTransactionReceipt,
   type BatchDryRunItemResult,
   type BatchDryRunResult,
+  type ContractEventSubscriptionHandle,
   type ContractFacadeClient,
+  type ContractLogEntry,
+  type ContractLogHistoryResult,
   type ContractLogKind,
   type ContractLogKindResolver,
   type ContractStorageReadResult,
   type ContractStorageTarget,
+  type DecodedContractEvent,
   type DecodedContractLog,
   type DecodedContractLogByKind,
   type DecodedTransactionReceiptLog,
@@ -64,6 +71,9 @@ import {
   type EstimateAndBuildCallClient,
   type EstimateAndBuildCallOptions,
   type EstimateBatchCallsOptions,
+  type GetContractLogHistoryOptions,
+  type GetLogsClient,
+  type GetLogsFilter,
   type HtlcCreateParams,
   type JsonRpcBatchItemResult,
   type JsonRpcBatchRequestItem,
@@ -83,6 +93,8 @@ import {
   type StorageSlotContract,
   type StorageSlotKey,
   type StorageSlotKind,
+  type SubscribeContractEventsOptions,
+  type SubscribeLogsWsClient,
   type TokenTransferParams,
   type VaultCreateParams,
   type WaitForTransactionReceiptClient,
@@ -768,6 +780,7 @@ export function runGoldenVectorSelfTest(): { ok: boolean; steps: SelfTestStep[] 
 
 export {
   ContractFacade,
+  DEFAULT_LOG_HISTORY_CHUNK_SIZE,
   decodeContractLog,
   decodeTransactionReceiptLogs,
   derivePrefixedStorageSlot,
@@ -777,6 +790,7 @@ export {
   estimateAndBuildCall,
   estimateBatchCalls,
   estimateCallTxSize,
+  getContractLogHistory,
   HtlcClient,
   KovanicaDecodeError,
   MAX_JSONRPC_BATCH_SIZE,
@@ -784,16 +798,21 @@ export {
   NameRegistryClient,
   NftClient,
   readContractStorage,
+  subscribeContractEvents,
   TokenClient,
   VaultClient,
   waitForTransactionReceipt,
   type BatchDryRunItemResult,
   type BatchDryRunResult,
+  type ContractEventSubscriptionHandle,
   type ContractFacadeClient,
+  type ContractLogEntry,
+  type ContractLogHistoryResult,
   type ContractLogKind,
   type ContractLogKindResolver,
   type ContractStorageReadResult,
   type ContractStorageTarget,
+  type DecodedContractEvent,
   type DecodedContractLog,
   type DecodedContractLogByKind,
   type DecodedTransactionReceiptLog,
@@ -808,6 +827,9 @@ export {
   type EstimateAndBuildCallClient,
   type EstimateAndBuildCallOptions,
   type EstimateBatchCallsOptions,
+  type GetContractLogHistoryOptions,
+  type GetLogsClient,
+  type GetLogsFilter,
   type HtlcCreateParams,
   type JsonRpcBatchItemResult,
   type JsonRpcBatchRequestItem,
@@ -827,6 +849,8 @@ export {
   type StorageSlotContract,
   type StorageSlotKey,
   type StorageSlotKind,
+  type SubscribeContractEventsOptions,
+  type SubscribeLogsWsClient,
   type TokenTransferParams,
   type VaultCreateParams,
   type WaitForTransactionReceiptClient,
@@ -2170,6 +2194,198 @@ export async function executeJsonRpcReadBatch(
     elapsedMs,
     items,
   };
+}
+
+// --- Typed Contract Facades Studio Runner ---
+
+export type TypedFacadeKind =
+  | "name"
+  | "token"
+  | "nft"
+  | "escrow"
+  | "htlc"
+  | "vault"
+  | "multisig";
+
+export interface TypedFacadeReadParams {
+  facade: TypedFacadeKind;
+  contract: Uint8Array | string;
+  key?: Uint8Array | string;
+}
+
+export interface TypedFacadeReadResult {
+  facade: TypedFacadeKind;
+  method: string;
+  contractAddress: string;
+  contractHex: string;
+  found: boolean;
+  record: unknown | null;
+}
+
+function requireNonEmptyFacadeKey(
+  facade: TypedFacadeKind,
+  key: Uint8Array | string | undefined,
+): Uint8Array | string {
+  if (key === undefined) {
+    throw new KovanicaDecodeError(
+      "INVALID_INPUT",
+      `Facade "${facade}" requires a non-empty key`,
+      { field: "key" },
+    );
+  }
+  if (typeof key === "string") {
+    const trimmed = key.trim();
+    if (trimmed.length === 0) {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        `Facade "${facade}" requires a non-empty key`,
+        { field: "key" },
+      );
+    }
+    return trimmed;
+  }
+  if (key.length === 0) {
+    throw new KovanicaDecodeError(
+      "INVALID_INPUT",
+      `Facade "${facade}" requires a non-empty key`,
+      { field: "key" },
+    );
+  }
+  return key;
+}
+
+/**
+ * Dispatches a typed read across all 7 canonical Kovanica SDK contract facades:
+ * - `name`     -> `NameRegistryClient.getRecord(key)`
+ * - `token`    -> `TokenClient.getMetadata()`
+ * - `nft`      -> `NftClient.getMetadata()`
+ * - `escrow`   -> `EscrowClient.getEscrow(key)`
+ * - `htlc`     -> `HtlcClient.getHtlc(key)`
+ * - `vault`    -> `VaultClient.getVault(key)`
+ * - `multisig` -> `MultisigClient.getState()`
+ */
+export async function runTypedFacadeRead(
+  client: ContractFacadeClient,
+  params: TypedFacadeReadParams,
+  options?: ReadContractStorageOptions,
+): Promise<TypedFacadeReadResult> {
+  const contractInput =
+    typeof params.contract === "string" ? params.contract.trim() : params.contract;
+  if (
+    !contractInput ||
+    (typeof contractInput === "string" && contractInput.length === 0) ||
+    (contractInput instanceof Uint8Array && contractInput.length === 0)
+  ) {
+    throw new KovanicaDecodeError(
+      "INVALID_INPUT",
+      "Contract address must be a non-empty 32-byte hex string, Uint8Array, or PRO-21 address",
+      { field: "contract" },
+    );
+  }
+
+  switch (params.facade) {
+    case "name": {
+      const key = requireNonEmptyFacadeKey("name", params.key);
+      if (typeof key !== "string") {
+        throw new KovanicaDecodeError(
+          "INVALID_INPUT",
+          'Facade "name" requires a string name key',
+          { field: "key" },
+        );
+      }
+      const facade = new NameRegistryClient(client, contractInput);
+      const record = await facade.getRecord(key, options);
+      return {
+        facade: "name",
+        method: "NameRegistryClient.getRecord",
+        contractAddress: facade.contractAddress,
+        contractHex: facade.contractHex,
+        found: record !== null,
+        record,
+      };
+    }
+    case "token": {
+      const facade = new TokenClient(client, contractInput);
+      const record = await facade.getMetadata(options);
+      return {
+        facade: "token",
+        method: "TokenClient.getMetadata",
+        contractAddress: facade.contractAddress,
+        contractHex: facade.contractHex,
+        found: record !== null,
+        record,
+      };
+    }
+    case "nft": {
+      const facade = new NftClient(client, contractInput);
+      const record = await facade.getMetadata(options);
+      return {
+        facade: "nft",
+        method: "NftClient.getMetadata",
+        contractAddress: facade.contractAddress,
+        contractHex: facade.contractHex,
+        found: record !== null,
+        record,
+      };
+    }
+    case "escrow": {
+      const key = requireNonEmptyFacadeKey("escrow", params.key);
+      const facade = new EscrowClient(client, contractInput);
+      const record = await facade.getEscrow(key, options);
+      return {
+        facade: "escrow",
+        method: "EscrowClient.getEscrow",
+        contractAddress: facade.contractAddress,
+        contractHex: facade.contractHex,
+        found: record !== null,
+        record,
+      };
+    }
+    case "htlc": {
+      const key = requireNonEmptyFacadeKey("htlc", params.key);
+      const facade = new HtlcClient(client, contractInput);
+      const record = await facade.getHtlc(key, options);
+      return {
+        facade: "htlc",
+        method: "HtlcClient.getHtlc",
+        contractAddress: facade.contractAddress,
+        contractHex: facade.contractHex,
+        found: record !== null,
+        record,
+      };
+    }
+    case "vault": {
+      const key = requireNonEmptyFacadeKey("vault", params.key);
+      const facade = new VaultClient(client, contractInput);
+      const record = await facade.getVault(key, options);
+      return {
+        facade: "vault",
+        method: "VaultClient.getVault",
+        contractAddress: facade.contractAddress,
+        contractHex: facade.contractHex,
+        found: record !== null,
+        record,
+      };
+    }
+    case "multisig": {
+      const facade = new MultisigClient(client, contractInput);
+      const record = await facade.getState(options);
+      return {
+        facade: "multisig",
+        method: "MultisigClient.getState",
+        contractAddress: facade.contractAddress,
+        contractHex: facade.contractHex,
+        found: record !== null,
+        record,
+      };
+    }
+    default:
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        `Unsupported contract facade: ${String(params.facade)}`,
+        { field: "facade" },
+      );
+  }
 }
 
 
