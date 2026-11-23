@@ -8,12 +8,28 @@ import {
   bip39Seed,
   CHAIN_IDS,
   decodeAddress,
+  decodeEscrowRecord,
+  decodeHtlcRecord,
+  decodeMultisigState,
+  decodeNameRecord,
+  decodeNftMetadata,
+  decodeTokenMetadata,
+  decodeVaultRecord,
   deriveBip44,
+  derivePrefixedStorageSlot,
+  deriveStorageSlotHex,
   encodeAddress,
+  estimateAndBuildCall,
+  estimateCallTxSize,
   formatBip44Path,
   getPublicKey,
   KOVANICA_COIN_TYPE,
+  KovanicaDecodeError,
   TESTNET_ADDRESS_PREFIX,
+  type EstimateAndBuildCallClient,
+  type EstimateAndBuildCallOptions,
+  type PreparedCallTransaction,
+  type StorageSlotContract,
 } from "kovanica-sdk";
 
 // Configure ed25519 sha512 provider
@@ -689,4 +705,231 @@ export function runGoldenVectorSelfTest(): { ok: boolean; steps: SelfTestStep[] 
 
   const ok = steps.every((s) => s.passed);
   return { ok, steps };
+}
+
+// --- SDK v0.4.0 Fee/Gas Estimation & Typed Bincode State Decoders ---
+
+export {
+  derivePrefixedStorageSlot,
+  deriveStorageSlotHex,
+  estimateAndBuildCall,
+  estimateCallTxSize,
+  KovanicaDecodeError,
+  type EstimateAndBuildCallClient,
+  type EstimateAndBuildCallOptions,
+  type PreparedCallTransaction,
+  type StorageSlotContract,
+};
+
+export type ContractDecoderKind =
+  | "name"
+  | "htlc"
+  | "escrow"
+  | "vault"
+  | "token_metadata"
+  | "nft_metadata"
+  | "multisig";
+
+/**
+ * Estimates fee, gas limit, serialized wire size, and sender nonce for a
+ * Wasmi contract call using `kovanica-sdk`'s `estimateAndBuildCall`.
+ */
+export async function estimateContractCall(
+  client: EstimateAndBuildCallClient,
+  call: CallTxKind,
+  options: EstimateAndBuildCallOptions = {},
+): Promise<PreparedCallTransaction> {
+  return estimateAndBuildCall(
+    client,
+    {
+      contract: call.contract,
+      method: call.method,
+      args: call.args,
+      call_value: call.value,
+      gas_limit: call.gasLimit,
+    },
+    options,
+  );
+}
+
+/**
+ * Decodes a hex-encoded (or raw Uint8Array) Bincode 1.x contract state record
+ * using `kovanica-sdk` v0.4.0 typed ABI decoders.
+ */
+export function decodeContractStateHex(
+  kind: ContractDecoderKind,
+  input: string | Uint8Array,
+): unknown {
+  switch (kind) {
+    case "name":
+      return decodeNameRecord(input);
+    case "htlc":
+      return decodeHtlcRecord(input);
+    case "escrow":
+      return decodeEscrowRecord(input);
+    case "vault":
+      return decodeVaultRecord(input);
+    case "token_metadata":
+      return decodeTokenMetadata(input);
+    case "nft_metadata":
+      return decodeNftMetadata(input);
+    case "multisig":
+      return decodeMultisigState(input);
+  }
+}
+
+export interface DeriveContractStorageSlotOptions {
+  kind: ContractDecoderKind;
+  key?: string;
+  customPrefix?: string;
+}
+
+/**
+ * Derives a canonical 32-byte BLAKE3 storage slot (64-char hex string) for a
+ * contract record type and key, or a custom prefix + key via `derivePrefixedStorageSlot`.
+ * If `key` is already a raw `0x`-prefixed 32-byte hex slot and no `customPrefix`
+ * is specified for singleton kinds, or when explicitly provided for custom lookup,
+ * returns the canonical 64-char lowercase hex slot.
+ */
+export function deriveContractStorageSlotHex(
+  options: DeriveContractStorageSlotOptions,
+): string {
+  const rawKey = (options.key ?? "").trim();
+  const customPrefix = (options.customPrefix ?? "").trim();
+
+  if (customPrefix.length > 0) {
+    if (rawKey.length === 0) {
+      return bytesToHex(derivePrefixedStorageSlot(customPrefix));
+    }
+    const cleanHex = rawKey.startsWith("0x") || rawKey.startsWith("0X") ? rawKey.slice(2) : rawKey;
+    const isHex32 = /^[0-9a-fA-F]{64}$/.test(cleanHex);
+    const keyArg: string | Uint8Array = isHex32 ? hexToBytes(cleanHex) : rawKey;
+    return bytesToHex(derivePrefixedStorageSlot(customPrefix, keyArg));
+  }
+
+  switch (options.kind) {
+    case "name":
+      return deriveStorageSlotHex("name", rawKey);
+    case "htlc":
+      return deriveStorageSlotHex("htlc", rawKey);
+    case "escrow":
+      return deriveStorageSlotHex("escrow", rawKey);
+    case "vault":
+      return deriveStorageSlotHex("vault", rawKey);
+    case "token_metadata":
+      return deriveStorageSlotHex("token");
+    case "nft_metadata":
+      return deriveStorageSlotHex("nft");
+    case "multisig":
+      return deriveStorageSlotHex("multisig");
+  }
+}
+
+export interface StorageAtRpcClient {
+  getStorageAt?: (address: string, slot: string) => Promise<string | null | undefined>;
+  call?: <TResult = unknown>(method: string, params?: unknown) => Promise<TResult>;
+}
+
+export interface FetchAndDecodeStorageSlotOptions {
+  contractAddress: string;
+  kind: ContractDecoderKind;
+  key?: string;
+  customPrefix?: string;
+  slotOverrideHex?: string;
+}
+
+export interface FetchAndDecodeStorageSlotResult {
+  contractAddress: string;
+  slotHex: string;
+  rawStorageHex: string;
+  isEmpty: boolean;
+  decoded: unknown | null;
+}
+
+/**
+ * Checks whether a raw hex storage response from `kovanica_getStorageAt` represents
+ * an uninitialized / empty storage slot (`null`, `""`, `"0x"`, or all-zero bytes when empty).
+ */
+export function isStorageSlotEmpty(rawHex: string | null | undefined): boolean {
+  if (rawHex === null || rawHex === undefined) {
+    return true;
+  }
+  const trimmed = String(rawHex).trim();
+  const clean = trimmed.startsWith("0x") || trimmed.startsWith("0X")
+    ? trimmed.slice(2)
+    : trimmed;
+  return clean.length === 0 || /^0+$/.test(clean);
+}
+
+/**
+ * Derives the canonical 32-byte BLAKE3 storage slot (via `deriveStorageSlotHex` or
+ * `derivePrefixedStorageSlot`), calls `kovanica_getStorageAt` against the configured
+ * RPC client, and decodes the returned Bincode state record using the selected typed decoder.
+ */
+export async function fetchAndDecodeContractStorageSlot(
+  client: StorageAtRpcClient,
+  options: FetchAndDecodeStorageSlotOptions,
+): Promise<FetchAndDecodeStorageSlotResult> {
+  const contractAddress = options.contractAddress.trim();
+  if (!contractAddress) {
+    throw new KovanicaDecodeError(
+      "INVALID_INPUT",
+      "Contract address is required for kovanica_getStorageAt",
+      { field: "contractAddress" },
+    );
+  }
+
+  let slotHex: string;
+  if (options.slotOverrideHex && options.slotOverrideHex.trim().length > 0) {
+    const clean = options.slotOverrideHex.trim().replace(/^0x/i, "");
+    if (!/^[0-9a-fA-F]{64}$/.test(clean)) {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        "Storage slot override must be a 32-byte (64-char) hex string",
+        { field: "slotOverrideHex" },
+      );
+    }
+    slotHex = clean.toLowerCase();
+  } else {
+    slotHex = deriveContractStorageSlotHex({
+      kind: options.kind,
+      key: options.key,
+      customPrefix: options.customPrefix,
+    });
+  }
+
+  const rpcSlotArg = slotHex.startsWith("0x") ? slotHex : `0x${slotHex}`;
+  let rawResponse: string | null | undefined;
+  if (typeof client.getStorageAt === "function") {
+    rawResponse = await client.getStorageAt(contractAddress, rpcSlotArg);
+  } else if (typeof client.call === "function") {
+    rawResponse = await client.call<string | null | undefined>("kovanica_getStorageAt", [
+      contractAddress,
+      rpcSlotArg,
+    ]);
+  } else {
+    throw new Error("RPC client must provide getStorageAt() or call()");
+  }
+
+  const normalizedRaw =
+    rawResponse === null || rawResponse === undefined ? "" : String(rawResponse).trim();
+
+  if (isStorageSlotEmpty(normalizedRaw)) {
+    return {
+      contractAddress,
+      slotHex,
+      rawStorageHex: normalizedRaw || "0x",
+      isEmpty: true,
+      decoded: null,
+    };
+  }
+
+  const decoded = decodeContractStateHex(options.kind, normalizedRaw);
+  return {
+    contractAddress,
+    slotHex,
+    rawStorageHex: normalizedRaw,
+    isEmpty: false,
+    decoded,
+  };
 }

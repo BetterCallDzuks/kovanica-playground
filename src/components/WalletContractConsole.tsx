@@ -11,13 +11,21 @@ import {
   buildNftMintCall,
   buildTokenTransferCall,
   buildVaultCreateCall,
+  decodeContractStateHex,
   deriveAccountsFromMnemonic,
+  deriveContractStorageSlotHex,
+  estimateContractCall,
+  fetchAndDecodeContractStorageSlot,
   generateMnemonic,
   hexToBytes,
+  KovanicaDecodeError,
   runGoldenVectorSelfTest,
   signAndSerializeTransaction,
   validateMnemonic,
+  type CallTxKind,
+  type ContractDecoderKind,
   type DerivedAccountInfo,
+  type PreparedCallTransaction,
   type SelfTestStep,
   type TxKind,
   type UnsignedTx,
@@ -102,6 +110,22 @@ export function WalletContractConsole({ client, selectedChainId }: Props) {
   const [broadcastStatus, setBroadcastStatus] = useState<string | null>(null);
   const [copySuccess, setCopySuccess] = useState<string | null>(null);
 
+  // SDK v0.4.0 Fee & Nonce Estimation state
+  const [isEstimating, setIsEstimating] = useState<boolean>(false);
+  const [preparedEstimate, setPreparedEstimate] = useState<PreparedCallTransaction | null>(null);
+
+  // SDK v0.4.0 Contract State Bincode Decoder & Live Storage Slot Fetch state
+  const [decoderKind, setDecoderKind] = useState<ContractDecoderKind>("name");
+  const [storageContractAddr, setStorageContractAddr] = useState<string>("0x" + "33".repeat(32));
+  const [customSlotPrefix, setCustomSlotPrefix] = useState<string>("");
+  const [slotKeyInput, setSlotKeyInput] = useState<string>("alice");
+  const [derivedSlotHex, setDerivedSlotHex] = useState<string | null>(null);
+  const [decoderHexInput, setDecoderHexInput] = useState<string>("");
+  const [decodedOutput, setDecodedOutput] = useState<string | null>(null);
+  const [decoderError, setDecoderError] = useState<string | null>(null);
+  const [storageEmptyMsg, setStorageEmptyMsg] = useState<string | null>(null);
+  const [isFetchingStorage, setIsFetchingStorage] = useState<boolean>(false);
+
   // Self-test results
   const [selfTestSteps, setSelfTestSteps] = useState<SelfTestStep[] | null>(null);
 
@@ -136,6 +160,202 @@ export function WalletContractConsole({ client, selectedChainId }: Props) {
     navigator.clipboard.writeText(text);
     setCopySuccess(label);
     setTimeout(() => setCopySuccess(null), 2000);
+  };
+
+  const buildActiveCallKind = (): CallTxKind => {
+    if (!activeAccount) {
+      throw new Error("No active account available");
+    }
+    const contract = hexToBytes(contractHex.trim());
+    if (txType === "token_transfer") {
+      const recipient = accounts[1]?.publicKey || activeAccount.publicKey;
+      const units = BigInt(tokenUnitsStr || "0");
+      return buildTokenTransferCall(contract, recipient, units);
+    }
+    if (txType === "vault_create") {
+      const beneficiary = accounts[1]?.publicKey || activeAccount.publicKey;
+      const atoms = parseKvnc(amountKvncStr || "0");
+      const lockUntil = BigInt(lockUntilMsStr || (Date.now() + 86400000).toString());
+      return buildVaultCreateCall(contract, beneficiary, atoms, lockUntil);
+    }
+    if (txType === "name_register") {
+      const regPubkey = namePubkeyHex.trim()
+        ? hexToBytes(namePubkeyHex.trim())
+        : accounts[1]?.publicKey || activeAccount.publicKey;
+      const endpoints = relayEndpointsStr
+        .split("\n")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      return {
+        type: "call",
+        contract,
+        value: 0n,
+        method: "name_register",
+        args: buildNameRegisterCall(nameStr.trim(), regPubkey, endpoints),
+        gasLimit: 100_000n,
+      };
+    }
+    if (txType === "htlc_create") {
+      const hashlock = hexToBytes(hashlockHex.trim());
+      const timelock = BigInt(timelockStr.trim() || "0");
+      const recipient = htlcRecipientHex.trim()
+        ? hexToBytes(htlcRecipientHex.trim())
+        : accounts[1]?.publicKey || activeAccount.publicKey;
+      return {
+        type: "call",
+        contract,
+        value: 0n,
+        method: "htlc_create",
+        args: buildHtlcCreateCall(hashlock, timelock, recipient),
+        gasLimit: 100_000n,
+      };
+    }
+    if (txType === "nft_mint") {
+      const collection = hexToBytes(collectionHex.trim());
+      const to = nftToHex.trim()
+        ? hexToBytes(nftToHex.trim())
+        : accounts[1]?.publicKey || activeAccount.publicKey;
+      const tokenId = BigInt(tokenIdStr.trim() || "0");
+      return {
+        type: "call",
+        contract,
+        value: 0n,
+        method: "nft_mint",
+        args: buildNftMintCall(collection, to, tokenId, tokenUriStr.trim()),
+        gasLimit: 100_000n,
+      };
+    }
+    if (txType === "escrow_create") {
+      const rawParties = escrowPartiesStr
+        .split(/[\n,]/)
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      const parties =
+        rawParties.length > 0
+          ? rawParties.map((p) => hexToBytes(p))
+          : [activeAccount.publicKey, accounts[1]?.publicKey || activeAccount.publicKey];
+      const threshold = Number(escrowThresholdStr.trim() || "1");
+      const amount = BigInt(escrowAmountStr.trim() || "0");
+      const deadline = BigInt(escrowDeadlineStr.trim() || "0");
+      return {
+        type: "call",
+        contract,
+        value: 0n,
+        method: "escrow_create",
+        args: buildEscrowCreateCall(parties, threshold, amount, deadline),
+        gasLimit: 100_000n,
+      };
+    }
+    throw new Error(`Estimate is only supported for Wasmi contract call actions (got ${txType})`);
+  };
+
+  const handleEstimateCall = async () => {
+    setErrorMsg(null);
+    setPreparedEstimate(null);
+    if (!activeAccount) {
+      setErrorMsg("No active account available for fee estimation");
+      return;
+    }
+    setIsEstimating(true);
+    try {
+      const callKind = buildActiveCallKind();
+      const prepared = await estimateContractCall(client, callKind, {
+        sender: activeAccount.address,
+        chainId: selectedChainId,
+      });
+      setPreparedEstimate(prepared);
+      setFeeStr(prepared.fee.toString());
+      if (prepared.nonce !== undefined) {
+        setNonceStr(prepared.nonce.toString());
+      }
+    } catch (err: any) {
+      setErrorMsg(`Fee estimation failed: ${err?.message || String(err)}`);
+    } finally {
+      setIsEstimating(false);
+    }
+  };
+
+  const handleDecodeState = () => {
+    setDecoderError(null);
+    setDecodedOutput(null);
+    setStorageEmptyMsg(null);
+    try {
+      const decoded = decodeContractStateHex(decoderKind, decoderHexInput.trim());
+      setDecodedOutput(
+        JSON.stringify(
+          decoded,
+          (_key, value) => (typeof value === "bigint" ? value.toString() : value),
+          2,
+        ),
+      );
+    } catch (err: unknown) {
+      if (err instanceof KovanicaDecodeError) {
+        setDecoderError(
+          `[${err.code}${err.offset !== undefined ? ` @ byte ${err.offset}` : ""}] ${err.message}`,
+        );
+      } else {
+        setDecoderError(err instanceof Error ? err.message : String(err));
+      }
+    }
+  };
+
+  const handleDeriveSlot = () => {
+    setDecoderError(null);
+    setStorageEmptyMsg(null);
+    try {
+      const slot = deriveContractStorageSlotHex({
+        kind: decoderKind,
+        key: slotKeyInput,
+        customPrefix: customSlotPrefix,
+      });
+      setDerivedSlotHex(slot);
+    } catch (err: unknown) {
+      if (err instanceof KovanicaDecodeError) {
+        setDecoderError(`[${err.code}] ${err.message}`);
+      } else {
+        setDecoderError(err instanceof Error ? err.message : String(err));
+      }
+    }
+  };
+
+  const handleFetchAndDecodeStorage = async () => {
+    setDecoderError(null);
+    setDecodedOutput(null);
+    setStorageEmptyMsg(null);
+    setIsFetchingStorage(true);
+    try {
+      const result = await fetchAndDecodeContractStorageSlot(client, {
+        contractAddress: storageContractAddr,
+        kind: decoderKind,
+        key: slotKeyInput,
+        customPrefix: customSlotPrefix,
+      });
+      setDerivedSlotHex(result.slotHex);
+      setDecoderHexInput(result.rawStorageHex);
+      if (result.isEmpty) {
+        setStorageEmptyMsg(
+          `Storage slot 0x${result.slotHex} is empty (${result.rawStorageHex}) on contract ${result.contractAddress}.`,
+        );
+      } else {
+        setDecodedOutput(
+          JSON.stringify(
+            result.decoded,
+            (_key, value) => (typeof value === "bigint" ? value.toString() : value),
+            2,
+          ),
+        );
+      }
+    } catch (err: unknown) {
+      if (err instanceof KovanicaDecodeError) {
+        setDecoderError(
+          `[${err.code}${err.offset !== undefined ? ` @ byte ${err.offset}` : ""}] ${err.message}`,
+        );
+      } else {
+        setDecoderError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      setIsFetchingStorage(false);
+    }
   };
 
   const handleSign = () => {
@@ -805,14 +1025,55 @@ export function WalletContractConsole({ client, selectedChainId }: Props) {
           )}
         </div>
 
-        <button
-          type="button"
-          onClick={handleSign}
-          disabled={!isMnemonicValid}
-          className="px-5 py-2.5 bg-gold hover:bg-gold/90 text-bg font-semibold rounded-lg text-sm transition-colors disabled:opacity-50 self-start"
-        >
-          Sign & Bincode Serialize
-        </button>
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={handleSign}
+            disabled={!isMnemonicValid}
+            className="px-5 py-2.5 bg-gold hover:bg-gold/90 text-bg font-semibold rounded-lg text-sm transition-colors disabled:opacity-50"
+          >
+            Sign & Bincode Serialize
+          </button>
+
+          {txType !== "transfer" && (
+            <button
+              type="button"
+              data-testid="estimate-call-btn"
+              onClick={handleEstimateCall}
+              disabled={!isMnemonicValid || isEstimating}
+              className="px-4 py-2.5 bg-surface-2 hover:bg-border text-fg font-medium rounded-lg text-xs border border-border transition-colors disabled:opacity-50"
+            >
+              {isEstimating ? "Estimating..." : "Estimate Fee & Nonce (SDK)"}
+            </button>
+          )}
+        </div>
+
+        {preparedEstimate && (
+          <div
+            data-testid="prepared-estimate-summary"
+            className="bg-surface-2/80 border border-gold/30 rounded-lg p-3 text-xs font-mono flex flex-wrap gap-x-5 gap-y-1 text-muted"
+          >
+            <span>
+              Size: <strong className="text-fg">{preparedEstimate.estimatedTxSize}B</strong>
+            </span>
+            {preparedEstimate.feeRatePerByte !== undefined && (
+              <span>
+                Rate: <strong className="text-fg">{preparedEstimate.feeRatePerByte.toString()} atoms/B</strong>
+              </span>
+            )}
+            <span>
+              Fee (+20%): <strong className="text-gold">{preparedEstimate.fee.toString()} atoms</strong>
+            </span>
+            <span>
+              Gas Limit: <strong className="text-fg">{preparedEstimate.gasLimit.toString()}</strong>
+            </span>
+            {preparedEstimate.nonce !== undefined && (
+              <span>
+                Nonce: <strong className="text-fg">{preparedEstimate.nonce.toString()}</strong>
+              </span>
+            )}
+          </div>
+        )}
 
         {errorMsg && (
           <div className="text-xs text-red-400 bg-red-950/40 p-3 rounded border border-red-800">
@@ -876,6 +1137,174 @@ export function WalletContractConsole({ client, selectedChainId }: Props) {
               )}
             </div>
           </div>
+        )}
+      </div>
+
+      {/* SDK v0.4.0 Contract State Bincode Decoder & Live Storage Slot Fetch */}
+      <div className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-4" data-testid="bincode-decoder-panel">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
+          <div>
+            <h2 className="text-sm font-semibold text-fg">
+              Contract State Bincode Decoder (SDK v0.4.0)
+            </h2>
+            <p className="text-xs text-muted">
+              Live Storage Slot Fetch (<code className="font-mono text-fg">kovanica_getStorageAt</code>), canonical BLAKE3 slot derivation, and typed Bincode 1.x decoding
+            </p>
+          </div>
+          <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-surface-2 border border-border text-gold">
+            kovanica_getStorageAt
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label htmlFor="storage-contract-address" className="block text-xs font-medium text-muted mb-1">
+              Contract Address (PRO-21 <code className="font-mono">kvnc...dag</code> / <code className="font-mono">tknc...dag</code> or 32-byte hex)
+            </label>
+            <input
+              id="storage-contract-address"
+              data-testid="storage-contract-address"
+              type="text"
+              value={storageContractAddr}
+              onChange={(e) => setStorageContractAddr(e.target.value)}
+              placeholder="kvnc...dag or 0x..."
+              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+            />
+          </div>
+
+          <div>
+            <label htmlFor="decoder-kind-select" className="block text-xs font-medium text-muted mb-1">
+              Contract Record Type & Typed Decoder
+            </label>
+            <select
+              id="decoder-kind-select"
+              data-testid="decoder-kind-select"
+              value={decoderKind}
+              onChange={(e) => setDecoderKind(e.target.value as ContractDecoderKind)}
+              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+            >
+              <option value="name">NameRecord — decodeNameRecord (kvnc/v1/name/)</option>
+              <option value="htlc">HtlcRecord — decodeHtlcRecord (kvnc/v1/htlc/)</option>
+              <option value="escrow">EscrowRecord — decodeEscrowRecord (kvnc/v1/escrow/)</option>
+              <option value="vault">VaultRecord — decodeVaultRecord (kvnc/v1/vault/)</option>
+              <option value="token_metadata">TokenMetadata — decodeTokenMetadata (kvnc/v1/state)</option>
+              <option value="nft_metadata">NftMetadata — decodeNftMetadata (kvnc/v1/state)</option>
+              <option value="multisig">MultisigState — decodeMultisigState (kvnc/v1/state)</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div>
+            <label htmlFor="decoder-custom-prefix" className="block text-xs font-medium text-muted mb-1">
+              Custom Storage Prefix (optional override)
+            </label>
+            <input
+              id="decoder-custom-prefix"
+              data-testid="decoder-custom-prefix"
+              type="text"
+              value={customSlotPrefix}
+              onChange={(e) => setCustomSlotPrefix(e.target.value)}
+              placeholder="e.g. kvnc/v1/name/ (defaults to record prefix)"
+              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+            />
+          </div>
+
+          <div className="md:col-span-2 flex flex-wrap items-end gap-2">
+            <div className="flex-1 min-w-[180px]">
+              <label htmlFor="decoder-slot-key" className="block text-xs font-medium text-muted mb-1">
+                Storage Slot Key (name / 32-byte hex ID; ignored for singleton <code className="font-mono">kvnc/v1/state</code> unless custom prefix set)
+              </label>
+              <input
+                id="decoder-slot-key"
+                data-testid="decoder-slot-key"
+                type="text"
+                value={slotKeyInput}
+                onChange={(e) => setSlotKeyInput(e.target.value)}
+                placeholder="alice or 64-char hex ID"
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+            <button
+              type="button"
+              data-testid="derive-slot-btn"
+              onClick={handleDeriveSlot}
+              className="px-3 py-2 bg-surface-2 hover:bg-border border border-border rounded-lg text-xs text-fg font-medium whitespace-nowrap transition-colors"
+            >
+              Derive Slot
+            </button>
+            <button
+              type="button"
+              data-testid="fetch-storage-slot-btn"
+              onClick={handleFetchAndDecodeStorage}
+              disabled={isFetchingStorage}
+              className="px-3.5 py-2 bg-gold hover:bg-gold/90 text-bg rounded-lg text-xs font-semibold whitespace-nowrap transition-colors disabled:opacity-50"
+            >
+              {isFetchingStorage ? "Fetching Storage..." : "Live Fetch & Decode (kovanica_getStorageAt)"}
+            </button>
+          </div>
+        </div>
+
+        {derivedSlotHex && (
+          <div
+            data-testid="derived-slot-hex"
+            className="bg-surface-2/80 border border-border rounded-lg px-3 py-2 text-xs font-mono text-emerald-400 break-all"
+          >
+            Derived BLAKE3 Slot (32B): 0x{derivedSlotHex}
+          </div>
+        )}
+
+        <div>
+          <label htmlFor="decoder-hex-input" className="block text-xs font-medium text-muted mb-1">
+            Raw Storage Value (Hex)
+          </label>
+          <textarea
+            id="decoder-hex-input"
+            data-testid="decoder-hex-input"
+            rows={2}
+            value={decoderHexInput}
+            onChange={(e) => setDecoderHexInput(e.target.value)}
+            placeholder="0x..."
+            className="w-full bg-surface-2 border border-border rounded-lg p-2.5 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+          />
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            data-testid="decode-bincode-btn"
+            onClick={handleDecodeState}
+            className="px-4 py-2 bg-gold/20 hover:bg-gold/30 rounded-lg border border-gold/40 text-gold text-xs font-semibold transition-colors"
+          >
+            Decode Bincode State
+          </button>
+        </div>
+
+        {storageEmptyMsg && (
+          <div
+            data-testid="storage-empty-msg"
+            className="text-xs font-mono text-amber-300 bg-amber-950/30 border border-amber-800/50 rounded-lg p-3"
+          >
+            {storageEmptyMsg}
+          </div>
+        )}
+
+        {decoderError && (
+          <div
+            data-testid="decoder-error-msg"
+            className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3"
+          >
+            {decoderError}
+          </div>
+        )}
+
+        {decodedOutput && (
+          <pre
+            data-testid="decoded-json-output"
+            className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto"
+          >
+            {decodedOutput}
+          </pre>
         )}
       </div>
 

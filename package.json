@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "kovanicaSdk": {
-    "repository": "https://github.com/KovanicaDAG/kovanica-sdk",
-    "testedRevision": "83a6495f15e271db9de10d68c1c90d46f9e539d5"
+    "repository": "https://github.com/BetterCallDzuks/kovanica-sdk",
+    "testedRevision": "146cd10a6cd604c65bda81bd633c0ae1e1a619ab"
   },
   "scripts": {
     "prepare:sdk": "node scripts/prepare-sdk.mjs",
