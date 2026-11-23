@@ -8,6 +8,7 @@ import {
   applyFeeBuffer,
   bip39Seed,
   CHAIN_IDS,
+  computeTransferTransactionSigningHash,
   ContractFacade,
   createFailoverClient,
   decodeAddress,
@@ -18,6 +19,7 @@ import {
   decodeNameRecord,
   decodeNftMetadata,
   decodeSignedCallTransaction,
+  decodeSignedTransferTransaction,
   decodeTokenMetadata,
   decodeTransactionReceiptLogs,
   decodeVaultRecord,
@@ -38,6 +40,7 @@ import {
   getContractLogHistory,
   getPublicKey,
   HtlcClient,
+  inspectAddress,
   KOVANICA_COIN_TYPE,
   KovanicaClient,
   KovanicaDecodeError,
@@ -45,9 +48,11 @@ import {
   MultisigClient,
   NameRegistryClient,
   NftClient,
+  normalizeAddressList,
   probeRpcNode,
   readContractStorage,
   sanitizeRpcUrl,
+  signTransferTransaction,
   subscribeContractEvents,
   TESTNET_ADDRESS_PREFIX,
   TokenClient,
@@ -55,8 +60,11 @@ import {
   VaultClient,
   verifyCallTransactionSignature,
   verifyEd25519,
+  verifyTransferTransactionSignature,
   waitForTransactionFinality,
   waitForTransactionReceipt,
+  type AddressFormat,
+  type AddressInspectionResult,
   type BatchDryRunItemResult,
   type BatchDryRunResult,
   type ContractEventSubscriptionHandle,
@@ -72,6 +80,8 @@ import {
   type DecodedContractLogByKind,
   type DecodedSignedCallTransaction,
   type DecodeSignedCallTransactionOptions,
+  type DecodedSignedTransferTransaction,
+  type DecodeSignedTransferTransactionOptions,
   type DecodedTransactionReceiptLog,
   type DecodedTransactionReceiptLogByKind,
   type DefaultDecodedStorageByKind,
@@ -106,6 +116,8 @@ import {
   type NameRegisterParams,
   type NameResolveOptions,
   type NftMintParams,
+  type NormalizeAddressListOptions,
+  type NormalizeAddressListResult,
   type PreparedBatchCallTransactions,
   type PreparedCallTransaction,
   type ReadContractStorageClient,
@@ -116,12 +128,15 @@ import {
   type RpcNodeProbeOptions,
   type RpcNodeProbeResult,
   type RpcRetryConfig,
+  type SignedTransferTxResult,
+  type SignTransferTxParams,
   type StorageSlotContract,
   type StorageSlotKey,
   type StorageSlotKind,
   type SubscribeContractEventsOptions,
   type SubscribeLogsWsClient,
   type TokenTransferParams,
+  type TransferSigningHashParams,
   type VaultCreateParams,
   type WaitForFinalityOptions,
   type WaitForTransactionReceiptClient,
@@ -807,11 +822,13 @@ export function runGoldenVectorSelfTest(): { ok: boolean; steps: SelfTestStep[] 
 
 export {
   applyFeeBuffer,
+  computeTransferTransactionSigningHash,
   ContractFacade,
   createFailoverClient,
   DEFAULT_LOG_HISTORY_CHUNK_SIZE,
   decodeContractLog,
   decodeSignedCallTransaction,
+  decodeSignedTransferTransaction,
   decodeTransactionReceiptLogs,
   derivePrefixedStorageSlot,
   deriveStorageSlotHex,
@@ -824,21 +841,27 @@ export {
   FailoverHttpTransport,
   getContractLogHistory,
   HtlcClient,
+  inspectAddress,
   KovanicaDecodeError,
   MAX_JSONRPC_BATCH_SIZE,
   MultisigClient,
   NameRegistryClient,
   NftClient,
+  normalizeAddressList,
   probeRpcNode,
   readContractStorage,
   sanitizeRpcUrl,
+  signTransferTransaction,
   subscribeContractEvents,
   TokenClient,
   VaultClient,
   verifyCallTransactionSignature,
   verifyEd25519,
+  verifyTransferTransactionSignature,
   waitForTransactionFinality,
   waitForTransactionReceipt,
+  type AddressFormat,
+  type AddressInspectionResult,
   type BatchDryRunItemResult,
   type BatchDryRunResult,
   type ContractEventSubscriptionHandle,
@@ -854,6 +877,8 @@ export {
   type DecodedContractLogByKind,
   type DecodedSignedCallTransaction,
   type DecodeSignedCallTransactionOptions,
+  type DecodedSignedTransferTransaction,
+  type DecodeSignedTransferTransactionOptions,
   type DecodedTransactionReceiptLog,
   type DecodedTransactionReceiptLogByKind,
   type DefaultDecodedStorageByKind,
@@ -888,6 +913,8 @@ export {
   type NameRegisterParams,
   type NameResolveOptions,
   type NftMintParams,
+  type NormalizeAddressListOptions,
+  type NormalizeAddressListResult,
   type PreparedBatchCallTransactions,
   type PreparedCallTransaction,
   type ReadContractStorageClient,
@@ -898,12 +925,15 @@ export {
   type RpcNodeProbeOptions,
   type RpcNodeProbeResult,
   type RpcRetryConfig,
+  type SignedTransferTxResult,
+  type SignTransferTxParams,
   type StorageSlotContract,
   type StorageSlotKey,
   type StorageSlotKind,
   type SubscribeContractEventsOptions,
   type SubscribeLogsWsClient,
   type TokenTransferParams,
+  type TransferSigningHashParams,
   type VaultCreateParams,
   type WaitForFinalityOptions,
   type WaitForTransactionReceiptClient,
@@ -2783,6 +2813,71 @@ export function inspectRawSignedCallTx(
     signingHashHex: decoded.signingHashHex,
     wireHashHex: decoded.wireHashHex,
     chainId: decoded.chainId,
+    wireSizeBytes: decoded.wireSizeBytes,
+    signatureValid,
+  };
+}
+
+export interface InspectRawSignedTransferTxOptions {
+  /**
+   * Optional Chain ID used when recomputing the domain-tagged BLAKE3 signing hash.
+   * Defaults to `CHAIN_IDS.MAINNET` (`1`) when omitted.
+   */
+  chainId?: bigint | number;
+  /**
+   * Optional 32-byte Ed25519 signer public key hex (with or without `0x` prefix).
+   * When omitted or blank, verifies against the transaction's embedded `senderBytes`.
+   */
+  publicKeyHex?: string;
+}
+
+export interface InspectedSignedTransferTx {
+  senderHex: string;
+  senderAddress: string;
+  recipientHex: string;
+  recipientAddress: string;
+  nonce: string;
+  amount: string;
+  fee: string;
+  signatureHex: string;
+  signingHashHex: string;
+  wireHashHex: string;
+  chainId: string;
+  wireSizeBytes: number;
+  signatureValid: boolean;
+}
+
+/**
+ * Decodes a raw signed native Transfer transaction hex offline via
+ * `decodeSignedTransferTransaction`, verifies its Ed25519 signature via
+ * `verifyTransferTransactionSignature`, and returns a JSON-safe summary
+ * (with all `bigint` fields serialized as decimal strings).
+ */
+export function inspectRawSignedTransferTx(
+  rawTxHex: string,
+  options?: InspectRawSignedTransferTxOptions,
+): InspectedSignedTransferTx {
+  const normalizedChainId = normalizeOptionalChainId(options?.chainId);
+  const overridePubKey = parseOptionalPublicKeyHex(options?.publicKeyHex);
+
+  const decoded = decodeSignedTransferTransaction(
+    rawTxHex.trim(),
+    normalizedChainId !== undefined ? { chainId: normalizedChainId } : undefined,
+  );
+  const signatureValid = verifyTransferTransactionSignature(decoded, overridePubKey);
+
+  return {
+    senderHex: decoded.senderHex,
+    senderAddress: decoded.senderAddress,
+    recipientHex: decoded.recipientHex,
+    recipientAddress: decoded.recipientAddress,
+    nonce: decoded.nonce.toString(),
+    amount: decoded.amount.toString(),
+    fee: decoded.fee.toString(),
+    signatureHex: decoded.signatureHex,
+    signingHashHex: decoded.signingHashHex,
+    wireHashHex: decoded.wireHashHex,
+    chainId: decoded.chainId.toString(),
     wireSizeBytes: decoded.wireSizeBytes,
     signatureValid,
   };

@@ -5,51 +5,63 @@ import { describe, expect, it } from "vitest";
 import {
   applyFeeBuffer,
   CHAIN_IDS,
+  computeTransferTransactionSigningHash,
   createFailoverClient,
   decodeSignedCallTransaction,
+  decodeSignedTransferTransaction,
   dryRunBatchCalls,
   EscrowClient,
   estimateTxFeeWithBuffer,
   FailoverHttpTransport,
   getContractLogHistory,
   HtlcClient,
+  inspectAddress,
   MAX_JSONRPC_BATCH_SIZE,
   MultisigClient,
   NameRegistryClient,
   NftClient,
+  normalizeAddressList,
   probeRpcNode,
   readContractStorage,
   sanitizeRpcUrl,
+  signTransferTransaction,
   subscribeContractEvents,
   TokenClient,
   VaultClient,
   verifyCallTransactionSignature,
   verifyEd25519,
+  verifyTransferTransactionSignature,
   waitForTransactionFinality,
 } from "kovanica-sdk";
 import { ALLOWLISTED_METHODS, validateParam } from "../src/methods";
 import {
   applyFeeBuffer as interopApplyFeeBuffer,
+  computeTransferTransactionSigningHash as interopComputeTransferTransactionSigningHash,
   createFailoverClient as interopCreateFailoverClient,
   decodeSignedCallTransaction as interopDecodeSignedCallTransaction,
+  decodeSignedTransferTransaction as interopDecodeSignedTransferTransaction,
   dryRunBatchCalls as interopDryRunBatchCalls,
   EscrowClient as interopEscrowClient,
   estimateTxFeeWithBuffer as interopEstimateTxFeeWithBuffer,
   FailoverHttpTransport as interopFailoverHttpTransport,
   getContractLogHistory as interopGetContractLogHistory,
   HtlcClient as interopHtlcClient,
+  inspectAddress as interopInspectAddress,
   MAX_JSONRPC_BATCH_SIZE as interopMaxJsonRpcBatchSize,
   MultisigClient as interopMultisigClient,
   NameRegistryClient as interopNameRegistryClient,
   NftClient as interopNftClient,
+  normalizeAddressList as interopNormalizeAddressList,
   probeRpcNode as interopProbeRpcNode,
   readContractStorage as interopReadContractStorage,
   sanitizeRpcUrl as interopSanitizeRpcUrl,
+  signTransferTransaction as interopSignTransferTransaction,
   subscribeContractEvents as interopSubscribeContractEvents,
   TokenClient as interopTokenClient,
   VaultClient as interopVaultClient,
   verifyCallTransactionSignature as interopVerifyCallTransactionSignature,
   verifyEd25519 as interopVerifyEd25519,
+  verifyTransferTransactionSignature as interopVerifyTransferTransactionSignature,
   waitForTransactionFinality as interopWaitForTransactionFinality,
 } from "../src/wallet-interop";
 
@@ -59,7 +71,7 @@ describe("Immutable SDK Pin & Traceability", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
     const pinnedSha = pkg?.kovanicaSdk?.testedRevision;
 
-    expect(pinnedSha).toBe("c6f886d81a0673a563d66f244755cf1e4d0a7ff5");
+    expect(pinnedSha).toBe("634e4aec5a12d628985a148181fadd38344b2864");
     expect(pinnedSha).toMatch(/^[0-9a-f]{40}$/);
 
     const ciWorkflow = fs.readFileSync(path.join(rootDir, ".github/workflows/ci.yml"), "utf8");
@@ -106,6 +118,12 @@ describe("Immutable SDK Pin & Traceability", () => {
     expect(distContent).toContain("verifyCallTransactionSignature");
     expect(distContent).toContain("verifyEd25519");
     expect(distContent).toContain("probeRpcNode");
+    expect(distContent).toContain("signTransferTransaction");
+    expect(distContent).toContain("decodeSignedTransferTransaction");
+    expect(distContent).toContain("verifyTransferTransactionSignature");
+    expect(distContent).toContain("computeTransferTransactionSigningHash");
+    expect(distContent).toContain("inspectAddress");
+    expect(distContent).toContain("normalizeAddressList");
 
     expect(typeof readContractStorage).toBe("function");
     expect(typeof dryRunBatchCalls).toBe("function");
@@ -121,6 +139,12 @@ describe("Immutable SDK Pin & Traceability", () => {
     expect(typeof verifyCallTransactionSignature).toBe("function");
     expect(typeof verifyEd25519).toBe("function");
     expect(typeof probeRpcNode).toBe("function");
+    expect(typeof signTransferTransaction).toBe("function");
+    expect(typeof decodeSignedTransferTransaction).toBe("function");
+    expect(typeof verifyTransferTransactionSignature).toBe("function");
+    expect(typeof computeTransferTransactionSigningHash).toBe("function");
+    expect(typeof inspectAddress).toBe("function");
+    expect(typeof normalizeAddressList).toBe("function");
     expect(interopReadContractStorage).toBe(readContractStorage);
     expect(interopDryRunBatchCalls).toBe(dryRunBatchCalls);
     expect(interopGetContractLogHistory).toBe(getContractLogHistory);
@@ -135,6 +159,12 @@ describe("Immutable SDK Pin & Traceability", () => {
     expect(interopVerifyCallTransactionSignature).toBe(verifyCallTransactionSignature);
     expect(interopVerifyEd25519).toBe(verifyEd25519);
     expect(interopProbeRpcNode).toBe(probeRpcNode);
+    expect(interopSignTransferTransaction).toBe(signTransferTransaction);
+    expect(interopDecodeSignedTransferTransaction).toBe(decodeSignedTransferTransaction);
+    expect(interopVerifyTransferTransactionSignature).toBe(verifyTransferTransactionSignature);
+    expect(interopComputeTransferTransactionSigningHash).toBe(computeTransferTransactionSigningHash);
+    expect(interopInspectAddress).toBe(inspectAddress);
+    expect(interopNormalizeAddressList).toBe(normalizeAddressList);
 
     // Assert all 7 typed contract facades + MAX_JSONRPC_BATCH_SIZE are exported and re-exported identically
     expect(MAX_JSONRPC_BATCH_SIZE).toBe(32);

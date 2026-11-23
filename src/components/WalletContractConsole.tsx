@@ -26,7 +26,9 @@ import {
   fetchAndDecodeContractStorageSlot,
   generateMnemonic,
   hexToBytes,
+  inspectAddress,
   inspectRawSignedCallTx,
+  inspectRawSignedTransferTx,
   KovanicaDecodeError,
   MAX_JSONRPC_BATCH_SIZE,
   parseImportedContractPresetsJson,
@@ -38,6 +40,7 @@ import {
   runTypedFacadeRead,
   signAndSerializeTransaction,
   validateMnemonic,
+  type AddressInspectionResult,
   type CallTxKind,
   type ContractDecoderKind,
   type ContractLogHistoryQueryResult,
@@ -45,6 +48,7 @@ import {
   type DerivedAccountInfo,
   type FailoverRpcProbeResult,
   type InspectedSignedCallTx,
+  type InspectedSignedTransferTx,
   type JsonRpcBatchRequestItem,
   type JsonRpcReadBatchSummary,
   type NodeCapabilityProbeSummary,
@@ -227,6 +231,23 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
   const [isProbingNode, setIsProbingNode] = useState<boolean>(false);
   const [nodeProbeResult, setNodeProbeResult] =
     useState<NodeCapabilityProbeSummary | null>(null);
+
+  // Address Inspector & Transfer Tx Verifier state
+  const [addressInspectInput, setAddressInspectInput] = useState<string>("");
+  const [addressInspectChainStr, setAddressInspectChainStr] = useState<string>(() =>
+    String(selectedChainId),
+  );
+  const [addressInspectResult, setAddressInspectResult] =
+    useState<AddressInspectionResult | null>(null);
+
+  const [transferTxHexInput, setTransferTxHexInput] = useState<string>("");
+  const [transferTxChainIdStr, setTransferTxChainIdStr] = useState<string>(() =>
+    String(selectedChainId),
+  );
+  const [transferTxPubkeyHex, setTransferTxPubkeyHex] = useState<string>("");
+  const [inspectedTransferTx, setInspectedTransferTx] =
+    useState<InspectedSignedTransferTx | null>(null);
+  const [transferTxInspectError, setTransferTxInspectError] = useState<string | null>(null);
 
   // Self-test results
   const [selfTestSteps, setSelfTestSteps] = useState<SelfTestStep[] | null>(null);
@@ -2949,6 +2970,313 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
                 className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto max-h-72"
               >
                 {JSON.stringify(nodeProbeResult, null, 2)}
+              </pre>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Address Inspector & Transfer Tx Verifier Panel */}
+      <div
+        className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-5"
+        data-testid="address-and-transfer-panel"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
+          <div>
+            <h2 className="text-sm font-semibold text-fg">
+              Address Inspector &amp; Transfer Tx Verifier
+            </h2>
+            <p className="text-xs text-muted">
+              Inspect PRO-21 (kvnc...dag / tknc...dag) or legacy 64-hex addresses against Chain 1/2/3 policy and verify raw signed Transfer transactions offline
+            </p>
+          </div>
+          <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-surface-2 border border-border text-gold">
+            PRO-21 + Ed25519
+          </span>
+        </div>
+
+        {/* Address Inspector */}
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-xs font-semibold text-muted uppercase tracking-wider">
+              Address Inspector (Chain 1 / 2 / 3 Policy)
+            </h3>
+            {activeAccount && (
+              <button
+                type="button"
+                data-testid="load-active-address-btn"
+                onClick={() => {
+                  setAddressInspectInput(activeAccount.address);
+                  setAddressInspectChainStr(String(selectedChainId));
+                }}
+                className="px-2.5 py-1 text-xs bg-surface-2 hover:bg-border rounded border border-border text-muted hover:text-fg transition-colors"
+              >
+                Use Active Account Address
+              </button>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+            <div className="md:col-span-2">
+              <label
+                htmlFor="address-inspect-input"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                Address (kvnc...dag, tknc...dag, or 64-hex)
+              </label>
+              <input
+                id="address-inspect-input"
+                data-testid="address-inspect-input"
+                type="text"
+                value={addressInspectInput}
+                onChange={(e) => setAddressInspectInput(e.target.value)}
+                placeholder="kvnc...dag, tknc...dag, or 0x..."
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="address-inspect-chain-select"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                Chain Policy
+              </label>
+              <select
+                id="address-inspect-chain-select"
+                data-testid="address-inspect-chain-select"
+                value={addressInspectChainStr}
+                onChange={(e) => setAddressInspectChainStr(e.target.value)}
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              >
+                <option value="">Any (no chain policy)</option>
+                <option value="1">Mainnet (Chain 1)</option>
+                <option value="2">Testnet (Chain 2)</option>
+                <option value="3">Devnet (Chain 3)</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              data-testid="inspect-address-btn"
+              onClick={() => {
+                const expectedChainId =
+                  addressInspectChainStr.trim().length > 0
+                    ? Number(addressInspectChainStr)
+                    : undefined;
+                setAddressInspectResult(inspectAddress(addressInspectInput, expectedChainId));
+              }}
+              className="px-4 py-2 bg-gold hover:bg-gold/90 text-bg rounded-lg text-xs font-semibold transition-colors"
+            >
+              Inspect Address
+            </button>
+          </div>
+
+          {addressInspectResult && (
+            <div data-testid="address-inspect-result" className="flex flex-col gap-2 text-xs">
+              <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1 text-muted">
+                <span>
+                  Valid:{" "}
+                  <strong
+                    data-testid="address-inspect-valid"
+                    className={addressInspectResult.valid ? "text-emerald-400" : "text-red-400"}
+                  >
+                    {addressInspectResult.valid ? "YES" : "NO"}
+                  </strong>
+                </span>
+                <span>
+                  Format: <strong className="text-gold">{addressInspectResult.format}</strong>
+                </span>
+                <span>
+                  Checksum:{" "}
+                  <strong
+                    className={
+                      addressInspectResult.checksumValid ? "text-emerald-400" : "text-red-400"
+                    }
+                  >
+                    {addressInspectResult.checksumValid ? "VALID" : "INVALID"}
+                  </strong>
+                </span>
+                <span>
+                  Chain Allowed:{" "}
+                  <strong
+                    className={
+                      addressInspectResult.chainAllowed === null
+                        ? "text-muted"
+                        : addressInspectResult.chainAllowed
+                          ? "text-emerald-400"
+                          : "text-red-400"
+                    }
+                  >
+                    {addressInspectResult.chainAllowed === null
+                      ? "N/A"
+                      : addressInspectResult.chainAllowed
+                        ? "ALLOWED"
+                        : "REJECTED"}
+                  </strong>
+                </span>
+              </div>
+
+              {addressInspectResult.error && (
+                <div className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3">
+                  {addressInspectResult.error}
+                </div>
+              )}
+
+              <pre
+                data-testid="address-inspect-json"
+                className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto max-h-60"
+              >
+                {JSON.stringify(addressInspectResult, null, 2)}
+              </pre>
+            </div>
+          )}
+        </div>
+
+        {/* Offline Transfer Tx Verifier */}
+        <div className="flex flex-col gap-3 border-t border-border pt-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-xs font-semibold text-muted uppercase tracking-wider">
+              Offline Signed Transfer Tx Verifier
+            </h3>
+            {signedResult?.rawTxHex && txType === "transfer" && (
+              <button
+                type="button"
+                data-testid="load-signed-transfer-tx-btn"
+                onClick={() => {
+                  setTransferTxHexInput(signedResult.rawTxHex);
+                  setTransferTxChainIdStr(String(selectedChainId));
+                  setTransferTxInspectError(null);
+                }}
+                className="px-2.5 py-1 text-xs bg-surface-2 hover:bg-border rounded border border-border text-muted hover:text-fg transition-colors"
+              >
+                Load Last Signed Transfer
+              </button>
+            )}
+          </div>
+
+          <textarea
+            id="transfer-tx-hex-input"
+            data-testid="transfer-tx-hex-input"
+            rows={3}
+            value={transferTxHexInput}
+            onChange={(e) => setTransferTxHexInput(e.target.value)}
+            placeholder="Paste raw signed Transfer transaction hex (0x... or bare 196-byte hex)..."
+            className="w-full bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+          />
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+            <div>
+              <label
+                htmlFor="transfer-tx-chain-id-input"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                Chain ID (for sighash)
+              </label>
+              <input
+                id="transfer-tx-chain-id-input"
+                data-testid="transfer-tx-chain-id-input"
+                type="number"
+                min={0}
+                value={transferTxChainIdStr}
+                onChange={(e) => setTransferTxChainIdStr(e.target.value)}
+                placeholder={String(selectedChainId)}
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+
+            <div className="md:col-span-2">
+              <label
+                htmlFor="transfer-tx-pubkey-input"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                Signer Public Key Hex Override (optional, defaults to tx sender)
+              </label>
+              <input
+                id="transfer-tx-pubkey-input"
+                data-testid="transfer-tx-pubkey-input"
+                type="text"
+                value={transferTxPubkeyHex}
+                onChange={(e) => setTransferTxPubkeyHex(e.target.value)}
+                placeholder="64-char hex pubkey (optional)"
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              data-testid="decode-transfer-tx-btn"
+              onClick={() => {
+                setTransferTxInspectError(null);
+                setInspectedTransferTx(null);
+                try {
+                  const trimmedChain = transferTxChainIdStr.trim();
+                  const parsedChainId =
+                    trimmedChain.length > 0 ? BigInt(trimmedChain) : BigInt(selectedChainId);
+                  const inspected = inspectRawSignedTransferTx(transferTxHexInput, {
+                    chainId: parsedChainId,
+                    publicKeyHex: transferTxPubkeyHex.trim() || undefined,
+                  });
+                  setInspectedTransferTx(inspected);
+                } catch (err: unknown) {
+                  if (err instanceof KovanicaDecodeError) {
+                    setTransferTxInspectError(`[${err.code}] ${err.message}`);
+                  } else {
+                    setTransferTxInspectError(err instanceof Error ? err.message : String(err));
+                  }
+                }
+              }}
+              className="px-4 py-2 bg-gold/20 hover:bg-gold/30 rounded-lg border border-gold/40 text-gold text-xs font-semibold transition-colors"
+            >
+              Decode &amp; Verify Transfer Tx
+            </button>
+          </div>
+
+          {transferTxInspectError && (
+            <div
+              data-testid="transfer-tx-decode-error"
+              className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3"
+            >
+              {transferTxInspectError}
+            </div>
+          )}
+
+          {inspectedTransferTx && (
+            <div data-testid="transfer-tx-decode-result" className="flex flex-col gap-2 text-xs">
+              <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1 text-muted">
+                <span>
+                  Signature:{" "}
+                  <strong
+                    data-testid="transfer-tx-sig-status"
+                    className={
+                      inspectedTransferTx.signatureValid ? "text-emerald-400" : "text-red-400"
+                    }
+                  >
+                    {inspectedTransferTx.signatureValid ? "VALID" : "INVALID"}
+                  </strong>
+                </span>
+                <span>
+                  Amount: <strong className="text-gold">{inspectedTransferTx.amount}</strong>
+                </span>
+                <span>
+                  Nonce: <strong className="text-fg">{inspectedTransferTx.nonce}</strong>
+                </span>
+                <span>
+                  Fee: <strong className="text-fg">{inspectedTransferTx.fee}</strong>
+                </span>
+                <span>
+                  Size: <strong className="text-fg">{inspectedTransferTx.wireSizeBytes}B</strong>
+                </span>
+              </div>
+              <pre
+                data-testid="transfer-tx-decode-json"
+                className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto max-h-72"
+              >
+                {JSON.stringify(inspectedTransferTx, null, 2)}
               </pre>
             </div>
           )}

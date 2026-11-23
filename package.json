@@ -5,7 +5,7 @@
   "type": "module",
   "kovanicaSdk": {
     "repository": "https://github.com/BetterCallDzuks/kovanica-sdk",
-    "testedRevision": "c6f886d81a0673a563d66f244755cf1e4d0a7ff5"
+    "testedRevision": "634e4aec5a12d628985a148181fadd38344b2864"
   },
   "scripts": {
     "prepare:sdk": "node scripts/prepare-sdk.mjs",
