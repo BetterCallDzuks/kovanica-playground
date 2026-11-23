@@ -1,7 +1,37 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { KovanicaWsClient, type WsLogFilter } from "kovanica-sdk";
+import {
+  decodeContractLog,
+  KovanicaWsClient,
+  type ContractLogKind,
+  type DecodedContractLog,
+  type WsLogFilter,
+} from "kovanica-sdk";
 
 export type SubscriptionChannel = "newHeads" | "committedLeaders" | "logs";
+
+export type WsLogDecoderKind =
+  | "off"
+  | "name"
+  | "token_metadata"
+  | "nft_metadata"
+  | "escrow"
+  | "htlc"
+  | "vault"
+  | "multisig_state";
+
+export const WS_LOG_DECODER_OPTIONS: ReadonlyArray<{
+  value: WsLogDecoderKind;
+  label: string;
+}> = [
+  { value: "off", label: "Off (Raw JSON)" },
+  { value: "name", label: "name — NameRecord" },
+  { value: "token_metadata", label: "token_metadata — TokenMetadata" },
+  { value: "nft_metadata", label: "nft_metadata — NftMetadata" },
+  { value: "escrow", label: "escrow — EscrowRecord" },
+  { value: "htlc", label: "htlc — HtlcRecord" },
+  { value: "vault", label: "vault — VaultRecord" },
+  { value: "multisig_state", label: "multisig_state — MultisigState" },
+];
 
 export type WsConnectionState = "disconnected" | "connecting" | "connected" | "error";
 
@@ -92,6 +122,97 @@ function safeFormatJson(data: unknown): string {
   }
 }
 
+function normalizeLogDataInput(raw: unknown): Uint8Array | string | null {
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  if (raw instanceof Uint8Array) {
+    return raw.length > 0 ? raw : null;
+  }
+  if (Array.isArray(raw) && raw.length > 0 && raw.every((n) => typeof n === "number" && Number.isInteger(n) && n >= 0 && n <= 255)) {
+    return Uint8Array.from(raw);
+  }
+  return null;
+}
+
+function extractLogDataPayloads(payload: unknown): Array<Uint8Array | string> {
+  const direct = normalizeLogDataInput(payload);
+  if (direct !== null) return [direct];
+
+  const out: Array<Uint8Array | string> = [];
+  const collectFromItem = (item: unknown) => {
+    if (!item || typeof item !== "object") return;
+    const obj = item as Record<string, unknown>;
+    if (Array.isArray(obj.events)) {
+      for (const ev of obj.events) {
+        collectFromItem(ev);
+      }
+    }
+    if (Array.isArray(obj.logs)) {
+      for (const log of obj.logs) {
+        collectFromItem(log);
+      }
+    }
+    const fieldData = normalizeLogDataInput(obj.data);
+    if (fieldData !== null) {
+      out.push(fieldData);
+    }
+  };
+
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      collectFromItem(item);
+    }
+  } else {
+    collectFromItem(payload);
+  }
+
+  return out;
+}
+
+export interface InlineLogDecodeResult {
+  decoded: DecodedContractLog[];
+  fallbackReason?: string;
+}
+
+export function tryDecodeWsLogPayload(
+  payload: unknown,
+  decoderKind: WsLogDecoderKind,
+): InlineLogDecodeResult | null {
+  if (decoderKind === "off") return null;
+
+  const candidates = extractLogDataPayloads(payload);
+  if (candidates.length === 0) {
+    return {
+      decoded: [],
+      fallbackReason: "No decodable Bincode data payload found in notification frame; showing raw JSON.",
+    };
+  }
+
+  const decoded: DecodedContractLog[] = [];
+  let lastError: string | undefined;
+
+  for (const data of candidates) {
+    try {
+      decoded.push(decodeContractLog(data, decoderKind as ContractLogKind));
+    } catch (err: unknown) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  if (decoded.length === 0) {
+    return {
+      decoded: [],
+      fallbackReason: lastError
+        ? `Payload did not match "${decoderKind}" schema (${lastError}); showing raw JSON.`
+        : `Payload did not match "${decoderKind}" schema; showing raw JSON.`,
+    };
+  }
+
+  return { decoded };
+}
+
 export function WsSubscriptionConsole({
   rpcUrl,
   WebSocketImpl,
@@ -107,6 +228,7 @@ export function WsSubscriptionConsole({
   const [channel, setChannel] = useState<SubscriptionChannel>("newHeads");
   const [logAddressInput, setLogAddressInput] = useState<string>("");
   const [logTopicsInput, setLogTopicsInput] = useState<string>("");
+  const [logDecoderKind, setLogDecoderKind] = useState<WsLogDecoderKind>("off");
   const [activeSubscriptions, setActiveSubscriptions] = useState<ActiveSubscription[]>([]);
 
   // Event stream state
@@ -617,7 +739,24 @@ export function WsSubscriptionConsole({
             )}
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <label htmlFor="ws-log-decoder-select" className="text-xs text-muted whitespace-nowrap">
+              Bincode Log Decoder:
+            </label>
+            <select
+              id="ws-log-decoder-select"
+              data-testid="ws-log-decoder-select"
+              aria-label="Bincode Log Decoder"
+              value={logDecoderKind}
+              onChange={(e) => setLogDecoderKind(e.target.value as WsLogDecoderKind)}
+              className="bg-surface-2 border border-border rounded-lg px-2.5 py-1.5 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+            >
+              {WS_LOG_DECODER_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
             <button
               type="button"
               data-testid="ws-pause-resume-btn"
@@ -655,33 +794,68 @@ export function WsSubscriptionConsole({
             data-testid="ws-event-list"
             className="flex flex-col gap-3 max-h-[32rem] overflow-y-auto pr-1"
           >
-            {events.map((entry) => (
-              <div
-                key={entry.uid}
-                data-testid="ws-event-item"
-                className="bg-surface-2 rounded-lg border border-border p-3 flex flex-col gap-2"
-              >
-                <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
-                  <div className="flex items-center gap-2">
-                    <span className="px-2 py-0.5 rounded bg-gold/10 text-gold border border-gold/20 font-mono font-semibold">
-                      {entry.channel}
-                    </span>
-                    <span className="font-mono text-muted">sub: {entry.subscriptionId}</span>
-                    <span className="font-mono text-subtle">{entry.receivedAt}</span>
+            {events.map((entry) => {
+              const decodedResult =
+                entry.channel === "logs"
+                  ? tryDecodeWsLogPayload(entry.payload, logDecoderKind)
+                  : null;
+              const hasDecodedLogs = decodedResult !== null && decodedResult.decoded.length > 0;
+              return (
+                <div
+                  key={entry.uid}
+                  data-testid="ws-event-item"
+                  className="bg-surface-2 rounded-lg border border-border p-3 flex flex-col gap-2"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                    <div className="flex items-center gap-2">
+                      <span className="px-2 py-0.5 rounded bg-gold/10 text-gold border border-gold/20 font-mono font-semibold">
+                        {entry.channel}
+                      </span>
+                      {hasDecodedLogs && (
+                        <span
+                          data-testid="ws-decoded-badge"
+                          className="px-2 py-0.5 rounded bg-emerald-950/60 text-emerald-300 border border-emerald-700/50 font-mono"
+                        >
+                          decoded: {logDecoderKind}
+                        </span>
+                      )}
+                      <span className="font-mono text-muted">sub: {entry.subscriptionId}</span>
+                      <span className="font-mono text-subtle">{entry.receivedAt}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleCopyEvent(entry)}
+                      className="px-2 py-0.5 rounded bg-surface hover:bg-border border border-border text-muted hover:text-fg transition-colors"
+                    >
+                      {copiedUid === entry.uid ? "Copied!" : "Copy JSON"}
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => handleCopyEvent(entry)}
-                    className="px-2 py-0.5 rounded bg-surface hover:bg-border border border-border text-muted hover:text-fg transition-colors"
-                  >
-                    {copiedUid === entry.uid ? "Copied!" : "Copy JSON"}
-                  </button>
+                  {hasDecodedLogs && (
+                    <pre
+                      data-testid="ws-decoded-log"
+                      className="bg-emerald-950/20 p-3 rounded border border-emerald-800/40 text-xs font-mono text-emerald-200 overflow-x-auto"
+                    >
+                      {safeFormatJson(
+                        decodedResult.decoded.length === 1
+                          ? decodedResult.decoded[0]
+                          : decodedResult.decoded,
+                      )}
+                    </pre>
+                  )}
+                  {decodedResult?.fallbackReason && (
+                    <div
+                      data-testid="ws-decode-fallback"
+                      className="text-[11px] font-mono text-amber-300 bg-amber-950/30 border border-amber-800/50 rounded px-2.5 py-1.5"
+                    >
+                      {decodedResult.fallbackReason}
+                    </div>
+                  )}
+                  <pre className="bg-surface p-3 rounded border border-border/60 text-xs font-mono text-fg overflow-x-auto">
+                    {entry.rawJson}
+                  </pre>
                 </div>
-                <pre className="bg-surface p-3 rounded border border-border/60 text-xs font-mono text-fg overflow-x-auto">
-                  {entry.rawJson}
-                </pre>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

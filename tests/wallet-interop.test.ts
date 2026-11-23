@@ -37,6 +37,7 @@ import {
   fetchAndDecodeContractStorageSlot,
   formatAddressForChain,
   generateMnemonic,
+  getContractLogHistory,
   hexToBytes,
   HtlcClient,
   isStorageSlotEmpty,
@@ -51,7 +52,9 @@ import {
   pollAndDecodeTransactionReceipt,
   readContractStorage,
   runGoldenVectorSelfTest,
+  runTypedFacadeRead,
   signAndSerializeTransaction,
+  subscribeContractEvents,
   TokenClient,
   u128le,
   u32le,
@@ -1613,6 +1616,225 @@ describe("Ecosystem HD Wallet & Wasmi Contract Interoperability (PRO-53, PRO-48)
         expect(msState).not.toBeNull();
         expect(msState?.threshold).toBe(2);
         expect(msState?.nextTxId).toBe(9n);
+      });
+    });
+
+    describe("SDK edd5cb5 runTypedFacadeRead, getContractLogHistory & subscribeContractEvents", () => {
+      it("dispatches runTypedFacadeRead cleanly across all 7 canonical contract facades", async () => {
+        const contractHex = "33".repeat(32);
+        const pkA = hexToBytes("aa".repeat(32));
+        const pkB = hexToBytes("bb".repeat(32));
+        const id32 = "11".repeat(32);
+
+        const nameBytes = concat([
+          pkA,
+          pkB,
+          encodeBincodeStringVec(["https://relay1.kovanica.org"]),
+        ]);
+        const tokenBytes = concat([
+          encodeBincodeString("Kovanica USD"),
+          encodeBincodeString("KUSD"),
+          Uint8Array.of(6),
+          u128le(1_000_000_000n),
+          pkA,
+          pkB,
+          u64le(0n),
+          u64le(0n),
+          Uint8Array.of(0),
+          encodeBincodeString("https://kovanica.network/kusd.svg"),
+        ]);
+        const nftBytes = concat([
+          encodeBincodeString("Kovanica Artifacts"),
+          encodeBincodeString("KART"),
+          encodeBincodeString("ipfs://base/"),
+          pkA,
+          pkB,
+          u64le(0n),
+        ]);
+        const escrowBytes = concat([
+          pkA,
+          encodeBincodeBytes32Vec([pkA, pkB]),
+          Uint8Array.of(2),
+          encodeBincodeBytes32Vec([pkA]),
+          u128le(1_000_000_000n),
+          u64le(1760000000n),
+          Uint8Array.of(0),
+          Uint8Array.of(0),
+        ]);
+        const htlcBytes = concat([
+          pkA,
+          pkB,
+          u128le(500_000_000n),
+          hexToBytes("cc".repeat(32)),
+          u64le(1750000000n),
+          Uint8Array.of(0),
+          Uint8Array.of(0),
+        ]);
+        const vaultBytes = concat([
+          pkA,
+          pkB,
+          u128le(10_000_000_000n),
+          u128le(2_000_000_000n),
+          u32le(0),
+          u64le(1800000000n),
+          Uint8Array.of(0),
+        ]);
+        const multisigBytes = concat([
+          encodeBincodeBytes32Vec([pkA, pkB]),
+          u32le(2),
+          u64le(7n),
+        ]);
+
+        const mkClient = (payload: Uint8Array | null): ContractFacadeClient => ({
+          call: async () => "0x" as any,
+          estimateFee: async () => 10n,
+          getNonce: async () => 0n,
+          getStorageAt: async () => (payload ? `0x${bytesToHex(payload)}` : "0x"),
+        });
+
+        const nameRes = await runTypedFacadeRead(mkClient(nameBytes), {
+          facade: "name",
+          contract: contractHex,
+          key: "alice",
+        });
+        expect(nameRes.method).toBe("NameRegistryClient.getRecord");
+        expect(nameRes.found).toBe(true);
+        expect((nameRes.record as any).ownerHex).toBe("aa".repeat(32));
+
+        const tokenRes = await runTypedFacadeRead(mkClient(tokenBytes), {
+          facade: "token",
+          contract: contractHex,
+        });
+        expect(tokenRes.method).toBe("TokenClient.getMetadata");
+        expect(tokenRes.found).toBe(true);
+        expect((tokenRes.record as any).symbol).toBe("KUSD");
+
+        const nftRes = await runTypedFacadeRead(mkClient(nftBytes), {
+          facade: "nft",
+          contract: contractHex,
+        });
+        expect(nftRes.method).toBe("NftClient.getMetadata");
+        expect(nftRes.found).toBe(true);
+        expect((nftRes.record as any).name).toBe("Kovanica Artifacts");
+
+        const escrowRes = await runTypedFacadeRead(mkClient(escrowBytes), {
+          facade: "escrow",
+          contract: contractHex,
+          key: id32,
+        });
+        expect(escrowRes.method).toBe("EscrowClient.getEscrow");
+        expect(escrowRes.found).toBe(true);
+        expect((escrowRes.record as any).threshold).toBe(2);
+
+        const htlcRes = await runTypedFacadeRead(mkClient(htlcBytes), {
+          facade: "htlc",
+          contract: contractHex,
+          key: id32,
+        });
+        expect(htlcRes.method).toBe("HtlcClient.getHtlc");
+        expect(htlcRes.found).toBe(true);
+        expect((htlcRes.record as any).amount).toBe(500_000_000n);
+
+        const vaultRes = await runTypedFacadeRead(mkClient(vaultBytes), {
+          facade: "vault",
+          contract: contractHex,
+          key: id32,
+        });
+        expect(vaultRes.method).toBe("VaultClient.getVault");
+        expect(vaultRes.found).toBe(true);
+        expect((vaultRes.record as any).totalAmount).toBe(10_000_000_000n);
+
+        const msRes = await runTypedFacadeRead(mkClient(multisigBytes), {
+          facade: "multisig",
+          contract: contractHex,
+        });
+        expect(msRes.method).toBe("MultisigClient.getState");
+        expect(msRes.found).toBe(true);
+        expect((msRes.record as any).nextTxId).toBe(7n);
+
+        // Empty slot returns found: false, record: null
+        const emptyRes = await runTypedFacadeRead(mkClient(null), {
+          facade: "multisig",
+          contract: contractHex,
+        });
+        expect(emptyRes.found).toBe(false);
+        expect(emptyRes.record).toBeNull();
+
+        // Fail-closed validation on missing contract or missing required key
+        await expect(
+          runTypedFacadeRead(mkClient(null), { facade: "token", contract: "  " }),
+        ).rejects.toThrow(KovanicaDecodeError);
+        await expect(
+          runTypedFacadeRead(mkClient(null), { facade: "name", contract: contractHex }),
+        ).rejects.toThrow(KovanicaDecodeError);
+        await expect(
+          runTypedFacadeRead(mkClient(null), { facade: "escrow", contract: contractHex, key: "" }),
+        ).rejects.toThrow(KovanicaDecodeError);
+      });
+
+      it("supports getContractLogHistory and subscribeContractEvents re-exported from kovanica-sdk", async () => {
+        const pkA = hexToBytes("aa".repeat(32));
+        const pkB = hexToBytes("bb".repeat(32));
+        const nameBytes = concat([
+          pkA,
+          pkB,
+          encodeBincodeStringVec(["https://relay.kovanica.org"]),
+        ]);
+        const nameHex = `0x${bytesToHex(nameBytes)}`;
+
+        // 1. getContractLogHistory
+        const history = await getContractLogHistory(
+          {
+            getLogs: async () => [
+              {
+                address: "0x" + "33".repeat(32),
+                topics: ["0x01"],
+                data: nameHex,
+                blockNumber: 5n,
+              },
+            ],
+          },
+          {
+            fromBlock: 1n,
+            toBlock: 10n,
+            chunkSize: 10,
+            kind: "name",
+          },
+        );
+        expect(history.chunksQueried).toBe(1);
+        expect(history.decodedLogs).toHaveLength(1);
+        expect(history.decodedLogs[0].kind).toBe("name");
+        expect(history.decodedLogs[0].record.ownerHex).toBe("aa".repeat(32));
+
+        // 2. subscribeContractEvents
+        let capturedCb: ((payload: any) => void) | null = null;
+        let unsubscribedId = "";
+        const received: Array<{ kind: string; ownerHex: string }> = [];
+
+        const handle = await subscribeContractEvents(
+          {
+            subscribeLogs: async (_filter, cb) => {
+              capturedCb = cb;
+              return "0xsub-ev-1";
+            },
+            unsubscribe: async (id) => {
+              unsubscribedId = id;
+              return true;
+            },
+          },
+          { kind: "name" },
+          (ev) => {
+            received.push({ kind: ev.kind, ownerHex: ev.record.ownerHex });
+          },
+        );
+
+        expect(handle.subscriptionId).toBe("0xsub-ev-1");
+        expect(capturedCb).not.toBeNull();
+        capturedCb!([{ events: [{ data: nameHex }] }]);
+
+        expect(received).toEqual([{ kind: "name", ownerHex: "aa".repeat(32) }]);
+        expect(await handle.unsubscribe()).toBe(true);
+        expect(unsubscribedId).toBe("0xsub-ev-1");
       });
     });
   });

@@ -6,12 +6,14 @@ import {
   CHAIN_IDS,
   dryRunBatchCalls,
   EscrowClient,
+  getContractLogHistory,
   HtlcClient,
   MAX_JSONRPC_BATCH_SIZE,
   MultisigClient,
   NameRegistryClient,
   NftClient,
   readContractStorage,
+  subscribeContractEvents,
   TokenClient,
   VaultClient,
 } from "kovanica-sdk";
@@ -19,12 +21,14 @@ import { ALLOWLISTED_METHODS, validateParam } from "../src/methods";
 import {
   dryRunBatchCalls as interopDryRunBatchCalls,
   EscrowClient as interopEscrowClient,
+  getContractLogHistory as interopGetContractLogHistory,
   HtlcClient as interopHtlcClient,
   MAX_JSONRPC_BATCH_SIZE as interopMaxJsonRpcBatchSize,
   MultisigClient as interopMultisigClient,
   NameRegistryClient as interopNameRegistryClient,
   NftClient as interopNftClient,
   readContractStorage as interopReadContractStorage,
+  subscribeContractEvents as interopSubscribeContractEvents,
   TokenClient as interopTokenClient,
   VaultClient as interopVaultClient,
 } from "../src/wallet-interop";
@@ -35,7 +39,7 @@ describe("Immutable SDK Pin & Traceability", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
     const pinnedSha = pkg?.kovanicaSdk?.testedRevision;
 
-    expect(pinnedSha).toBe("e5f3b79bb32801816d3e48d2a30a3f7a566cb6ee");
+    expect(pinnedSha).toBe("edd5cb5397f05e5bcf47043beb47df22d363f7ca");
     expect(pinnedSha).toMatch(/^[0-9a-f]{40}$/);
 
     const ciWorkflow = fs.readFileSync(path.join(rootDir, ".github/workflows/ci.yml"), "utf8");
@@ -70,11 +74,17 @@ describe("Immutable SDK Pin & Traceability", () => {
     expect(distContent).toContain("NftClient");
     expect(distContent).toContain("VaultClient");
     expect(distContent).toContain("MultisigClient");
+    expect(distContent).toContain("getContractLogHistory");
+    expect(distContent).toContain("subscribeContractEvents");
 
     expect(typeof readContractStorage).toBe("function");
     expect(typeof dryRunBatchCalls).toBe("function");
+    expect(typeof getContractLogHistory).toBe("function");
+    expect(typeof subscribeContractEvents).toBe("function");
     expect(interopReadContractStorage).toBe(readContractStorage);
     expect(interopDryRunBatchCalls).toBe(dryRunBatchCalls);
+    expect(interopGetContractLogHistory).toBe(getContractLogHistory);
+    expect(interopSubscribeContractEvents).toBe(subscribeContractEvents);
 
     // Assert all 7 typed contract facades + MAX_JSONRPC_BATCH_SIZE are exported and re-exported identically
     expect(MAX_JSONRPC_BATCH_SIZE).toBe(32);

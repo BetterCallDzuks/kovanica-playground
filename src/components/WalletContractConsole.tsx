@@ -30,6 +30,7 @@ import {
   parseImportedContractPresetsJson,
   pollAndDecodeTransactionReceipt,
   runGoldenVectorSelfTest,
+  runTypedFacadeRead,
   signAndSerializeTransaction,
   validateMnemonic,
   type CallTxKind,
@@ -42,6 +43,8 @@ import {
   type PreparedCallTransaction,
   type SelfTestStep,
   type TxKind,
+  type TypedFacadeKind,
+  type TypedFacadeReadResult,
   type UnsignedTx,
 } from "../wallet-interop";
 
@@ -169,6 +172,14 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
   const [isRunningRpcBatch, setIsRunningRpcBatch] = useState<boolean>(false);
   const [rpcBatchSummary, setRpcBatchSummary] = useState<JsonRpcReadBatchSummary | null>(null);
   const [rpcBatchError, setRpcBatchError] = useState<string | null>(null);
+
+  // Typed Contract Facades Studio state
+  const [facadeKind, setFacadeKind] = useState<TypedFacadeKind>("name");
+  const [facadeContractInput, setFacadeContractInput] = useState<string>("0x" + "33".repeat(32));
+  const [facadeKeyInput, setFacadeKeyInput] = useState<string>("alice");
+  const [isReadingFacade, setIsReadingFacade] = useState<boolean>(false);
+  const [facadeReadResult, setFacadeReadResult] = useState<TypedFacadeReadResult | null>(null);
+  const [facadeReadError, setFacadeReadError] = useState<string | null>(null);
 
   // Self-test results
   const [selfTestSteps, setSelfTestSteps] = useState<SelfTestStep[] | null>(null);
@@ -2096,6 +2107,186 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
                 </div>
               ))}
             </div>
+          </div>
+        )}
+      </div>
+
+      {/* Typed Contract Facades Studio */}
+      <div
+        className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-4"
+        data-testid="typed-facades-studio-panel"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
+          <div>
+            <h2 className="text-sm font-semibold text-fg">
+              Typed Contract Facades Studio (7 Canonical Clients)
+            </h2>
+            <p className="text-xs text-muted">
+              Invoke <code className="font-mono text-fg">runTypedFacadeRead</code> across NameRegistry, Token, NFT, Escrow, HTLC, Vault, and Multisig SDK clients
+            </p>
+          </div>
+          <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-surface-2 border border-border text-gold">
+            7 SDK Facades
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+          <div>
+            <label
+              htmlFor="facade-kind-select"
+              className="block text-xs font-medium text-muted mb-1"
+            >
+              Contract Facade
+            </label>
+            <select
+              id="facade-kind-select"
+              data-testid="facade-kind-select"
+              value={facadeKind}
+              onChange={(e) => {
+                setFacadeKind(e.target.value as TypedFacadeKind);
+                setFacadeReadResult(null);
+                setFacadeReadError(null);
+              }}
+              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+            >
+              <option value="name">name — NameRegistryClient.getRecord</option>
+              <option value="token">token — TokenClient.getMetadata</option>
+              <option value="nft">nft — NftClient.getMetadata</option>
+              <option value="escrow">escrow — EscrowClient.getEscrow</option>
+              <option value="htlc">htlc — HtlcClient.getHtlc</option>
+              <option value="vault">vault — VaultClient.getVault</option>
+              <option value="multisig">multisig — MultisigClient.getState</option>
+            </select>
+          </div>
+
+          <div>
+            <label
+              htmlFor="facade-contract-input"
+              className="block text-xs font-medium text-muted mb-1"
+            >
+              Contract Address (PRO-21 or 32-byte hex)
+            </label>
+            <input
+              id="facade-contract-input"
+              data-testid="facade-contract-input"
+              type="text"
+              value={facadeContractInput}
+              onChange={(e) => setFacadeContractInput(e.target.value)}
+              placeholder="0x... or kvnc..."
+              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+            />
+          </div>
+
+          <div>
+            <label
+              htmlFor="facade-key-input"
+              className="block text-xs font-medium text-muted mb-1"
+            >
+              Record Key{" "}
+              {facadeKind === "token" || facadeKind === "nft" || facadeKind === "multisig"
+                ? "(singleton — not required)"
+                : facadeKind === "name"
+                  ? "(name string)"
+                  : "(32-byte ID hex)"}
+            </label>
+            <input
+              id="facade-key-input"
+              data-testid="facade-key-input"
+              type="text"
+              value={facadeKeyInput}
+              onChange={(e) => setFacadeKeyInput(e.target.value)}
+              disabled={
+                facadeKind === "token" || facadeKind === "nft" || facadeKind === "multisig"
+              }
+              placeholder={
+                facadeKind === "name"
+                  ? "alice"
+                  : facadeKind === "token" || facadeKind === "nft" || facadeKind === "multisig"
+                    ? "Singleton state"
+                    : "0x... (64 hex chars)"
+              }
+              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold disabled:opacity-50"
+            />
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            data-testid="run-facade-read-btn"
+            disabled={isReadingFacade}
+            onClick={async () => {
+              setFacadeReadError(null);
+              setFacadeReadResult(null);
+              setIsReadingFacade(true);
+              try {
+                const res = await runTypedFacadeRead(client, {
+                  facade: facadeKind,
+                  contract: facadeContractInput,
+                  key:
+                    facadeKind === "token" ||
+                    facadeKind === "nft" ||
+                    facadeKind === "multisig"
+                      ? undefined
+                      : facadeKeyInput,
+                });
+                setFacadeReadResult(res);
+              } catch (err: unknown) {
+                if (err instanceof KovanicaDecodeError) {
+                  setFacadeReadError(`[${err.code}] ${err.message}`);
+                } else {
+                  setFacadeReadError(err instanceof Error ? err.message : String(err));
+                }
+              } finally {
+                setIsReadingFacade(false);
+              }
+            }}
+            className="px-4 py-2 bg-gold hover:bg-gold/90 text-bg rounded-lg text-xs font-semibold transition-colors disabled:opacity-50"
+          >
+            {isReadingFacade ? "Reading Facade..." : "Run Typed Facade Read"}
+          </button>
+        </div>
+
+        {facadeReadError && (
+          <div
+            data-testid="facade-read-error"
+            className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3"
+          >
+            {facadeReadError}
+          </div>
+        )}
+
+        {facadeReadResult && (
+          <div
+            data-testid="facade-read-result"
+            className="flex flex-col gap-2 text-xs"
+          >
+            <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1 text-muted">
+              <span>
+                Method: <strong className="text-gold">{facadeReadResult.method}</strong>
+              </span>
+              <span>
+                Status:{" "}
+                <strong
+                  className={
+                    facadeReadResult.found ? "text-emerald-400" : "text-amber-300"
+                  }
+                >
+                  {facadeReadResult.found ? "found" : "empty (null)"}
+                </strong>
+              </span>
+            </div>
+            <pre
+              data-testid="facade-read-json"
+              className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto"
+            >
+              {JSON.stringify(
+                facadeReadResult.record,
+                (_key, value) =>
+                  typeof value === "bigint" ? value.toString() : value,
+                2,
+              )}
+            </pre>
           </div>
         )}
       </div>

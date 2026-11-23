@@ -5,6 +5,12 @@ import {
   WsSubscriptionConsole,
   type WebSocketLike,
 } from "../src/components/WsSubscriptionConsole";
+import {
+  bytesToHex,
+  concat,
+  encodeBincodeStringVec,
+  hexToBytes,
+} from "../src/wallet-interop";
 
 class MockWebSocket implements WebSocketLike {
   static instances: MockWebSocket[] = [];
@@ -336,5 +342,91 @@ describe("WsSubscriptionConsole", () => {
 
     unmount();
     expect(ws2.closeCalls).toHaveLength(1);
+  });
+
+  it("decodes incoming logs WS notifications inline via Bincode Log Decoder and falls back gracefully to raw JSON on schema mismatch", async () => {
+    render(
+      <WsSubscriptionConsole
+        rpcUrl="http://127.0.0.1:8545/rpc"
+        WebSocketImpl={MockWebSocket}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("ws-connect-btn"));
+    const ws = MockWebSocket.instances[0];
+    await act(async () => {
+      ws.simulateOpen();
+    });
+
+    // Subscribe to logs
+    fireEvent.change(screen.getByLabelText("Subscription Channel"), {
+      target: { value: "logs" },
+    });
+    fireEvent.click(screen.getByTestId("ws-subscribe-btn"));
+    await act(async () => {
+      ws.simulateMessage({ jsonrpc: "2.0", id: 1, result: "0xsub-logs-decode" });
+    });
+
+    // Select "name" in the Bincode Log Decoder dropdown
+    fireEvent.change(screen.getByTestId("ws-log-decoder-select"), {
+      target: { value: "name" },
+    });
+
+    const ownerHex = "aa".repeat(32);
+    const pubkeyHex = "bb".repeat(32);
+    const encodedName = concat([
+      hexToBytes(ownerHex),
+      hexToBytes(pubkeyHex),
+      encodeBincodeStringVec(["https://relay1.kovanica.org"]),
+    ]);
+
+    // 1. Valid NameRecord log frame -> decoded inline
+    await act(async () => {
+      ws.simulateMessage({
+        jsonrpc: "2.0",
+        method: "kovanica_subscription",
+        params: {
+          subscription: "0xsub-logs-decode",
+          result: [
+            {
+              txHash: "0x1234",
+              events: [
+                {
+                  contract: "0x" + "33".repeat(32),
+                  data: `0x${bytesToHex(encodedName)}`,
+                },
+              ],
+            },
+          ],
+        },
+      });
+    });
+
+    expect(screen.getByTestId("ws-decoded-badge").textContent).toContain("decoded: name");
+    const decodedBlock = screen.getByTestId("ws-decoded-log");
+    expect(decodedBlock.textContent).toContain(ownerHex);
+    expect(decodedBlock.textContent).toContain("https://relay1.kovanica.org");
+
+    // 2. Non-matching / malformed frame -> falls back gracefully to raw JSON
+    await act(async () => {
+      ws.simulateMessage({
+        jsonrpc: "2.0",
+        method: "kovanica_subscription",
+        params: {
+          subscription: "0xsub-logs-decode",
+          result: {
+            contract: "0x" + "33".repeat(32),
+            data: "0xdeadbeef",
+          },
+        },
+      });
+    });
+
+    const items = screen.getAllByTestId("ws-event-item");
+    expect(items).toHaveLength(2);
+    expect(screen.getByTestId("ws-decode-fallback").textContent).toContain(
+      'Payload did not match "name" schema',
+    );
+    expect(items[0].textContent).toContain("0xdeadbeef");
   });
 });
