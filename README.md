@@ -47,18 +47,18 @@ Kovanica Playground reflects the established Kovanica design system:
 
 ## Tested SDK Revision & Immutable Resolution
 
-`kovanica-playground` consumes `kovanica-sdk` at the pinned, immutable git revision [`f1aa74ad1e1076316692e801aec86d9c4e8b7c27`](https://github.com/BetterCallDzuks/kovanica-sdk/commit/f1aa74ad1e1076316692e801aec86d9c4e8b7c27):
+`kovanica-playground` consumes `kovanica-sdk` at the pinned, immutable git revision [`c6f886d81a0673a563d66f244755cf1e4d0a7ff5`](https://github.com/BetterCallDzuks/kovanica-sdk/commit/c6f886d81a0673a563d66f244755cf1e4d0a7ff5):
 
-- **Manifest Metadata (`package.json`):** Recorded in `kovanicaSdk.testedRevision` (`f1aa74ad1e1076316692e801aec86d9c4e8b7c27`) and linked via `"kovanica-sdk": "file:../kovanica-sdk"` in `package.json` and `package-lock.json`.
-- **Automated Verification (`scripts/prepare-sdk.mjs`):** Running `npm run prepare:sdk` (also invoked automatically during `npm run build`) verifies that `../kovanica-sdk` exists, is checked out at the exact pinned 40-character SHA `f1aa74ad1e1076316692e801aec86d9c4e8b7c27` (never following a moving `main`), and has compiled `dist/index.js`. If `../kovanica-sdk` is on a different branch or dirty, it materializes the pinned revision into `node_modules/kovanica-sdk` from an isolated worktree without modifying the sibling checkout.
-- **CI Enforcement (`.github/workflows/ci.yml` & `tests/methods.test.ts`):** GitHub Actions explicitly checks out `BetterCallDzuks/kovanica-sdk` at `ref: f1aa74ad1e1076316692e801aec86d9c4e8b7c27`, and unit tests assert that `package.json`, `.github/workflows/ci.yml`, and the resolved `node_modules/kovanica-sdk` match this SHA.
+- **Manifest Metadata (`package.json`):** Recorded in `kovanicaSdk.testedRevision` (`c6f886d81a0673a563d66f244755cf1e4d0a7ff5`) and linked via `"kovanica-sdk": "file:../kovanica-sdk"` in `package.json` and `package-lock.json`.
+- **Automated Verification (`scripts/prepare-sdk.mjs`):** Running `npm run prepare:sdk` (also invoked automatically during `npm run build`) verifies that `../kovanica-sdk` exists, is checked out at the exact pinned 40-character SHA `c6f886d81a0673a563d66f244755cf1e4d0a7ff5` (never following a moving `main`), and has compiled `dist/index.js`. If `../kovanica-sdk` is on a different branch or dirty, it materializes the pinned revision into `node_modules/kovanica-sdk` from an isolated worktree without modifying the sibling checkout.
+- **CI Enforcement (`.github/workflows/ci.yml` & `tests/methods.test.ts`):** GitHub Actions explicitly checks out `BetterCallDzuks/kovanica-sdk` at `ref: c6f886d81a0673a563d66f244755cf1e4d0a7ff5`, and unit tests assert that `package.json`, `.github/workflows/ci.yml`, and the resolved `node_modules/kovanica-sdk` match this SHA.
 
 ---
 
 ## Local Integration & Build Workflow
 
 ```bash
-# 1. Verify/clone and build ../kovanica-sdk at pinned SHA f1aa74ad1e1076316692e801aec86d9c4e8b7c27
+# 1. Verify/clone and build ../kovanica-sdk at pinned SHA c6f886d81a0673a563d66f244755cf1e4d0a7ff5
 npm run prepare:sdk
 
 # 2. Install playground dependencies cleanly from lockfile
@@ -132,7 +132,7 @@ In CI or isolated environments, the SDK is checked out at the exact pinned revis
 ```bash
 git clone https://github.com/BetterCallDzuks/kovanica-sdk.git
 cd kovanica-sdk
-git checkout f1aa74ad1e1076316692e801aec86d9c4e8b7c27
+git checkout c6f886d81a0673a563d66f244755cf1e4d0a7ff5
 npm ci
 npm run build
 

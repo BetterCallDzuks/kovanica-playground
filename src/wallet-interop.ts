@@ -17,6 +17,7 @@ import {
   decodeMultisigState,
   decodeNameRecord,
   decodeNftMetadata,
+  decodeSignedCallTransaction,
   decodeTokenMetadata,
   decodeTransactionReceiptLogs,
   decodeVaultRecord,
@@ -44,6 +45,7 @@ import {
   MultisigClient,
   NameRegistryClient,
   NftClient,
+  probeRpcNode,
   readContractStorage,
   sanitizeRpcUrl,
   subscribeContractEvents,
@@ -51,6 +53,8 @@ import {
   TokenClient,
   toHexQuantity,
   VaultClient,
+  verifyCallTransactionSignature,
+  verifyEd25519,
   waitForTransactionFinality,
   waitForTransactionReceipt,
   type BatchDryRunItemResult,
@@ -66,6 +70,8 @@ import {
   type DecodedContractEvent,
   type DecodedContractLog,
   type DecodedContractLogByKind,
+  type DecodedSignedCallTransaction,
+  type DecodeSignedCallTransactionOptions,
   type DecodedTransactionReceiptLog,
   type DecodedTransactionReceiptLogByKind,
   type DefaultDecodedStorageByKind,
@@ -107,6 +113,8 @@ import {
   type ReceiptLogEntry,
   type ReceiptWithLogs,
   type RequestOptions,
+  type RpcNodeProbeOptions,
+  type RpcNodeProbeResult,
   type RpcRetryConfig,
   type StorageSlotContract,
   type StorageSlotKey,
@@ -803,6 +811,7 @@ export {
   createFailoverClient,
   DEFAULT_LOG_HISTORY_CHUNK_SIZE,
   decodeContractLog,
+  decodeSignedCallTransaction,
   decodeTransactionReceiptLogs,
   derivePrefixedStorageSlot,
   deriveStorageSlotHex,
@@ -820,11 +829,14 @@ export {
   MultisigClient,
   NameRegistryClient,
   NftClient,
+  probeRpcNode,
   readContractStorage,
   sanitizeRpcUrl,
   subscribeContractEvents,
   TokenClient,
   VaultClient,
+  verifyCallTransactionSignature,
+  verifyEd25519,
   waitForTransactionFinality,
   waitForTransactionReceipt,
   type BatchDryRunItemResult,
@@ -840,6 +852,8 @@ export {
   type DecodedContractEvent,
   type DecodedContractLog,
   type DecodedContractLogByKind,
+  type DecodedSignedCallTransaction,
+  type DecodeSignedCallTransactionOptions,
   type DecodedTransactionReceiptLog,
   type DecodedTransactionReceiptLogByKind,
   type DefaultDecodedStorageByKind,
@@ -881,6 +895,8 @@ export {
   type ReceiptLogEntry,
   type ReceiptWithLogs,
   type RequestOptions,
+  type RpcNodeProbeOptions,
+  type RpcNodeProbeResult,
   type RpcRetryConfig,
   type StorageSlotContract,
   type StorageSlotKey,
@@ -2644,6 +2660,159 @@ export async function probeFailoverRpcEndpoints(
       error: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+// --- Offline Raw Wire Tx Decoder & RPC Node Capability Probe ---
+
+export interface InspectRawSignedCallTxOptions {
+  /**
+   * Optional Chain ID used when recomputing the domain-tagged BLAKE3 signing hash.
+   * Defaults to `CHAIN_IDS.MAINNET` (`1`) when omitted.
+   */
+  chainId?: bigint | number;
+  /**
+   * Optional 32-byte Ed25519 signer public key hex (with or without `0x` prefix).
+   * When omitted or blank, verifies against the transaction's embedded `senderBytes`.
+   */
+  publicKeyHex?: string;
+}
+
+export interface InspectedSignedCallTx {
+  senderHex: string;
+  senderAddress: string;
+  nonce: string;
+  fee: string;
+  contractHex: string;
+  contractAddress: string;
+  method: string;
+  callValue: string;
+  argsHex: string;
+  argsByteLength: number;
+  gasLimit: string;
+  signatureHex: string;
+  signingHashHex: string;
+  wireHashHex: string;
+  chainId: number;
+  wireSizeBytes: number;
+  signatureValid: boolean;
+}
+
+export interface NodeCapabilityProbeSummary {
+  ok: boolean;
+  url: string;
+  chainId?: string;
+  blockHeight?: string;
+  feeRate?: string;
+  batchSupported: boolean;
+  networkTag?: string;
+  rpcVersion?: string;
+  headerChainId?: string;
+  canonicalTagMatch: boolean | null;
+  latencyMs: number;
+  error?: string;
+}
+
+function normalizeOptionalChainId(chainId?: bigint | number): number | undefined {
+  if (chainId === undefined) return undefined;
+  if (typeof chainId === "bigint") {
+    if (chainId < 0n || chainId > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        "chainId must be a non-negative safe integer",
+        { field: "chainId" },
+      );
+    }
+    return Number(chainId);
+  }
+  if (!Number.isSafeInteger(chainId) || chainId < 0) {
+    throw new KovanicaDecodeError(
+      "INVALID_INPUT",
+      "chainId must be a non-negative safe integer",
+      { field: "chainId" },
+    );
+  }
+  return chainId;
+}
+
+function parseOptionalPublicKeyHex(publicKeyHex?: string): Uint8Array | undefined {
+  if (publicKeyHex === undefined) return undefined;
+  const trimmed = publicKeyHex.trim();
+  if (trimmed.length === 0) return undefined;
+  const clean = trimmed.startsWith("0x") || trimmed.startsWith("0X") ? trimmed.slice(2) : trimmed;
+  if (!/^[0-9a-fA-F]{64}$/.test(clean)) {
+    throw new KovanicaDecodeError(
+      "INVALID_INPUT",
+      "publicKeyHex must be a 32-byte (64-character) hex string",
+      { field: "publicKeyHex" },
+    );
+  }
+  return hexToBytes(clean);
+}
+
+/**
+ * Decodes a raw signed Call transaction hex offline via `decodeSignedCallTransaction`,
+ * verifies its Ed25519 signature via `verifyCallTransactionSignature`, and returns a
+ * JSON-safe summary (with all `bigint` fields serialized as decimal strings).
+ */
+export function inspectRawSignedCallTx(
+  rawTxHex: string,
+  options?: InspectRawSignedCallTxOptions,
+): InspectedSignedCallTx {
+  const normalizedChainId = normalizeOptionalChainId(options?.chainId);
+  const overridePubKey = parseOptionalPublicKeyHex(options?.publicKeyHex);
+
+  const decoded = decodeSignedCallTransaction(
+    rawTxHex.trim(),
+    normalizedChainId !== undefined ? { chainId: normalizedChainId } : undefined,
+  );
+  const signatureValid = verifyCallTransactionSignature(decoded, overridePubKey);
+
+  return {
+    senderHex: decoded.senderHex,
+    senderAddress: decoded.senderAddress,
+    nonce: decoded.nonce.toString(),
+    fee: decoded.fee.toString(),
+    contractHex: decoded.contractHex,
+    contractAddress: decoded.contractAddress,
+    method: decoded.method,
+    callValue: decoded.callValue.toString(),
+    argsHex: decoded.argsHex,
+    argsByteLength: decoded.args.length,
+    gasLimit: decoded.gasLimit.toString(),
+    signatureHex: decoded.signatureHex,
+    signingHashHex: decoded.signingHashHex,
+    wireHashHex: decoded.wireHashHex,
+    chainId: decoded.chainId,
+    wireSizeBytes: decoded.wireSizeBytes,
+    signatureValid,
+  };
+}
+
+/**
+ * Wraps `probeRpcNode` and converts all `bigint` fields (`chainId`, `blockHeight`,
+ * `feeRate`, `headerChainId`) to JSON-safe decimal strings.
+ */
+export async function runNodeCapabilityProbe(
+  url: string,
+  options?: RpcNodeProbeOptions,
+): Promise<NodeCapabilityProbeSummary> {
+  const result = await probeRpcNode(url, options);
+  return {
+    ok: result.ok,
+    url: result.url,
+    ...(result.chainId !== undefined ? { chainId: result.chainId.toString() } : {}),
+    ...(result.blockHeight !== undefined ? { blockHeight: result.blockHeight.toString() } : {}),
+    ...(result.feeRate !== undefined ? { feeRate: result.feeRate.toString() } : {}),
+    batchSupported: result.batchSupported,
+    ...(result.networkTag !== undefined ? { networkTag: result.networkTag } : {}),
+    ...(result.rpcVersion !== undefined ? { rpcVersion: result.rpcVersion } : {}),
+    ...(result.headerChainId !== undefined
+      ? { headerChainId: result.headerChainId.toString() }
+      : {}),
+    canonicalTagMatch: result.canonicalTagMatch,
+    latencyMs: result.latencyMs,
+    ...(result.error !== undefined ? { error: result.error } : {}),
+  };
 }
 
 

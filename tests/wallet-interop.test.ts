@@ -18,6 +18,7 @@ import {
   concat,
   decodeContractLog,
   decodeContractStateHex,
+  decodeSignedCallTransaction,
   decodeTransactionReceiptLogs,
   DEFAULT_JSONRPC_READ_BATCH_PRESET,
   deriveAccountsFromMnemonic,
@@ -40,6 +41,7 @@ import {
   getContractLogHistory,
   hexToBytes,
   HtlcClient,
+  inspectRawSignedCallTx,
   isStorageSlotEmpty,
   KovanicaDecodeError,
   MAX_CONTRACT_PRESETS_ITEMS,
@@ -51,9 +53,11 @@ import {
   parseImportedContractPresetsJson,
   pollAndDecodeTransactionReceipt,
   probeFailoverRpcEndpoints,
+  probeRpcNode,
   readContractStorage,
   runContractLogHistoryQuery,
   runGoldenVectorSelfTest,
+  runNodeCapabilityProbe,
   runTypedFacadeRead,
   signAndSerializeTransaction,
   subscribeContractEvents,
@@ -63,6 +67,8 @@ import {
   u64le,
   validateMnemonic,
   VaultClient,
+  verifyCallTransactionSignature,
+  verifyEd25519,
   waitForTransactionReceipt,
   type ContractFacadeClient,
   type UnsignedTx,
@@ -1973,6 +1979,224 @@ describe("Ecosystem HD Wallet & Wasmi Contract Interoperability (PRO-53, PRO-48)
         const emptyProbe = await probeFailoverRpcEndpoints("  , \n ");
         expect(emptyProbe.ok).toBe(false);
         expect(emptyProbe.activeEndpoints).toEqual([]);
+      });
+    });
+
+    describe("Raw Wire Tx Decoder & Node Capability Probe", () => {
+      it("decodes and verifies a valid signed Call transaction offline via inspectRawSignedCallTx", () => {
+        const accounts = deriveAccountsFromMnemonic(goldenMnemonic, "", 2, CHAIN_IDS.TESTNET);
+        const sender = accounts[0];
+        const recipient = accounts[1];
+        const contract = hexToBytes("33".repeat(32));
+
+        const callKind = buildTokenTransferCall(contract, recipient.publicKey, 750_000n, 120_000n);
+        const signed = signAndSerializeTransaction(
+          {
+            sender: sender.publicKey,
+            nonce: 9n,
+            kind: callKind,
+            fee: 18_500n,
+          },
+          sender.secretKey,
+          CHAIN_IDS.TESTNET,
+        );
+
+        const inspected = inspectRawSignedCallTx(`0x${signed.rawTxHex}`, {
+          chainId: BigInt(CHAIN_IDS.TESTNET),
+        });
+
+        expect(inspected.signatureValid).toBe(true);
+        expect(inspected.senderHex).toBe(`0x${sender.publicKeyHex}`);
+        expect(inspected.contractHex).toBe(`0x${"33".repeat(32)}`);
+        expect(inspected.method).toBe("token_transfer");
+        expect(inspected.nonce).toBe("9");
+        expect(inspected.fee).toBe("18500");
+        expect(inspected.callValue).toBe("0");
+        expect(inspected.gasLimit).toBe("120000");
+        expect(inspected.chainId).toBe(CHAIN_IDS.TESTNET);
+        expect(inspected.wireSizeBytes).toBe(signed.txSize);
+        expect(inspected.argsByteLength).toBe(callKind.args.length);
+        expect(inspected.signingHashHex).toBe(`0x${signed.sighashHex}`);
+        expect(inspected.signatureHex).toBe(`0x${signed.signatureHex}`);
+
+        // Must be cleanly JSON-serializable without custom bigint replacer
+        const serialized = JSON.stringify(inspected);
+        expect(serialized).toContain('"signatureValid":true');
+        expect(serialized).toContain('"method":"token_transfer"');
+
+        // Explicit matching publicKeyHex verifies true; mismatched publicKeyHex verifies false
+        expect(
+          inspectRawSignedCallTx(signed.rawTxHex, {
+            chainId: CHAIN_IDS.TESTNET,
+            publicKeyHex: `0x${sender.publicKeyHex}`,
+          }).signatureValid,
+        ).toBe(true);
+        expect(
+          inspectRawSignedCallTx(signed.rawTxHex, {
+            chainId: CHAIN_IDS.TESTNET,
+            publicKeyHex: recipient.publicKeyHex,
+          }).signatureValid,
+        ).toBe(false);
+
+        // Wrong chainId invalidates the recomputed signing hash
+        expect(
+          inspectRawSignedCallTx(signed.rawTxHex, {
+            chainId: CHAIN_IDS.MAINNET,
+          }).signatureValid,
+        ).toBe(false);
+
+        // Direct SDK re-exports work identically
+        const rawDecoded = decodeSignedCallTransaction(signed.rawTxHex, {
+          chainId: CHAIN_IDS.TESTNET,
+        });
+        expect(verifyCallTransactionSignature(rawDecoded)).toBe(true);
+        expect(verifyEd25519(rawDecoded.signature, rawDecoded.signingHash, sender.publicKey)).toBe(
+          true,
+        );
+      });
+
+      it("detects tampered signatures and fails closed on malformed raw wire tx hex", () => {
+        const accounts = deriveAccountsFromMnemonic(goldenMnemonic, "", 2, CHAIN_IDS.TESTNET);
+        const sender = accounts[0];
+        const contract = hexToBytes("44".repeat(32));
+        const callKind = buildNameRegisterCallTx(
+          contract,
+          "bob",
+          accounts[1].publicKey,
+          ["https://relay.kovanica.org"],
+        );
+        const signed = signAndSerializeTransaction(
+          {
+            sender: sender.publicKey,
+            nonce: 1n,
+            kind: callKind,
+            fee: 12_000n,
+          },
+          sender.secretKey,
+          CHAIN_IDS.TESTNET,
+        );
+
+        // Flip one byte inside the 64-byte signature (which precedes the 32-byte wire hash)
+        const tamperedBytes = new Uint8Array(signed.rawTxBytes);
+        const sigByteIndex = tamperedBytes.length - 32 - 1;
+        tamperedBytes[sigByteIndex] ^= 0xff;
+        const tamperedHex = bytesToHex(tamperedBytes);
+
+        const tamperedResult = inspectRawSignedCallTx(tamperedHex, {
+          chainId: CHAIN_IDS.TESTNET,
+        });
+        expect(tamperedResult.method).toBe("name_register");
+        expect(tamperedResult.signatureValid).toBe(false);
+
+        // Malformed / truncated hex throws KovanicaDecodeError
+        expect(() => inspectRawSignedCallTx("0xdeadbeef")).toThrow(KovanicaDecodeError);
+        expect(() => inspectRawSignedCallTx("0xzzzz")).toThrow(KovanicaDecodeError);
+        expect(() => inspectRawSignedCallTx("")).toThrow(KovanicaDecodeError);
+
+        // Invalid publicKeyHex throws KovanicaDecodeError
+        expect(() =>
+          inspectRawSignedCallTx(signed.rawTxHex, {
+            chainId: CHAIN_IDS.TESTNET,
+            publicKeyHex: "0x1234",
+          }),
+        ).toThrow(KovanicaDecodeError);
+      });
+
+      it("runs runNodeCapabilityProbe with JSON-safe bigint conversion and header inspection", async () => {
+        expect(typeof probeRpcNode).toBe("function");
+
+        let clockMs = 1_000;
+        const mockFetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+          clockMs += 37;
+          const batch = JSON.parse(String(init?.body ?? "[]")) as Array<{
+            id: number;
+            method: string;
+          }>;
+          const responses = batch.map((req) => {
+            if (req.method === "kovanica_chainId") {
+              return { jsonrpc: "2.0", id: req.id, result: "0x2" };
+            }
+            if (req.method === "kovanica_blockNumber") {
+              return { jsonrpc: "2.0", id: req.id, result: "0x64" };
+            }
+            if (req.method === "kovanica_estimateFee") {
+              return { jsonrpc: "2.0", id: req.id, result: "0x19" };
+            }
+            return { jsonrpc: "2.0", id: req.id, result: null };
+          });
+          return new Response(JSON.stringify(responses), {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+              "X-Kovanica-Network-Tag": "2-24cdb5fadd98b207",
+              "X-Kovanica-Rpc-Version": "1.0.0",
+              "X-Kovanica-Chain-Id": "2",
+            },
+          });
+        }) as typeof fetch;
+
+        const summary = await runNodeCapabilityProbe("https://testnet.kovanica.test/rpc", {
+          fetch: mockFetch,
+          expectedChainId: 2,
+          now: () => clockMs,
+        });
+
+        expect(summary.ok).toBe(true);
+        expect(summary.url).toBe("https://testnet.kovanica.test/rpc");
+        expect(summary.chainId).toBe("2");
+        expect(summary.blockHeight).toBe("100");
+        expect(summary.feeRate).toBe("25");
+        expect(summary.headerChainId).toBe("2");
+        expect(summary.batchSupported).toBe(true);
+        expect(summary.networkTag).toBe("2-24cdb5fadd98b207");
+        expect(summary.rpcVersion).toBe("1.0.0");
+        expect(summary.canonicalTagMatch).toBe(true);
+        expect(summary.latencyMs).toBe(37);
+        expect(summary.error).toBeUndefined();
+
+        // Must be cleanly JSON-serializable without custom bigint replacer
+        const serialized = JSON.stringify(summary);
+        expect(serialized).toContain('"networkTag":"2-24cdb5fadd98b207"');
+        expect(serialized).toContain('"blockHeight":"100"');
+
+        // Mismatched canonical network tag fails closed
+        const badTagFetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+          const batch = JSON.parse(String(init?.body ?? "[]")) as Array<{
+            id: number;
+            method: string;
+          }>;
+          const responses = batch.map((req) => ({
+            jsonrpc: "2.0",
+            id: req.id,
+            result: req.method === "kovanica_chainId" ? "0x2" : "0x1",
+          }));
+          return new Response(JSON.stringify(responses), {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+              "X-Kovanica-Network-Tag": "2-0000000000000000",
+            },
+          });
+        }) as typeof fetch;
+
+        const badTagSummary = await runNodeCapabilityProbe("https://spoofed.kovanica.test/rpc", {
+          fetch: badTagFetch,
+        });
+        expect(badTagSummary.ok).toBe(false);
+        expect(badTagSummary.canonicalTagMatch).toBe(false);
+        expect(badTagSummary.networkTag).toBe("2-0000000000000000");
+
+        // Transport failure returns ok: false with batchSupported: false
+        const failingFetch = (async () => {
+          throw new Error("ECONNREFUSED");
+        }) as typeof fetch;
+
+        const failedSummary = await runNodeCapabilityProbe("http://127.0.0.1:9999/rpc", {
+          fetch: failingFetch,
+        });
+        expect(failedSummary.ok).toBe(false);
+        expect(failedSummary.batchSupported).toBe(false);
+        expect(failedSummary.error).toBeTruthy();
       });
     });
   });

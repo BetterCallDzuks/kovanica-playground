@@ -26,6 +26,7 @@ import {
   fetchAndDecodeContractStorageSlot,
   generateMnemonic,
   hexToBytes,
+  inspectRawSignedCallTx,
   KovanicaDecodeError,
   MAX_JSONRPC_BATCH_SIZE,
   parseImportedContractPresetsJson,
@@ -33,6 +34,7 @@ import {
   probeFailoverRpcEndpoints,
   runContractLogHistoryQuery,
   runGoldenVectorSelfTest,
+  runNodeCapabilityProbe,
   runTypedFacadeRead,
   signAndSerializeTransaction,
   validateMnemonic,
@@ -42,8 +44,10 @@ import {
   type ContractLogKind,
   type DerivedAccountInfo,
   type FailoverRpcProbeResult,
+  type InspectedSignedCallTx,
   type JsonRpcBatchRequestItem,
   type JsonRpcReadBatchSummary,
+  type NodeCapabilityProbeSummary,
   type PollAndDecodeTransactionReceiptResult,
   type PreparedContractCallBatch,
   type PreparedCallTransaction,
@@ -206,6 +210,23 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
   const [isProbingFailover, setIsProbingFailover] = useState<boolean>(false);
   const [failoverProbeResult, setFailoverProbeResult] =
     useState<FailoverRpcProbeResult | null>(null);
+
+  // Raw Wire Tx Decoder & Node Capability Probe state
+  const [rawTxHexInput, setRawTxHexInput] = useState<string>("");
+  const [rawTxChainIdStr, setRawTxChainIdStr] = useState<string>(() =>
+    String(selectedChainId),
+  );
+  const [rawTxPubkeyHex, setRawTxPubkeyHex] = useState<string>("");
+  const [inspectedRawTx, setInspectedRawTx] = useState<InspectedSignedCallTx | null>(null);
+  const [rawTxInspectError, setRawTxInspectError] = useState<string | null>(null);
+
+  const [nodeProbeUrlInput, setNodeProbeUrlInput] = useState<string>(
+    () => rpcUrl?.trim() || "http://127.0.0.1:8545/rpc",
+  );
+  const [nodeProbeExpectedChainStr, setNodeProbeExpectedChainStr] = useState<string>("");
+  const [isProbingNode, setIsProbingNode] = useState<boolean>(false);
+  const [nodeProbeResult, setNodeProbeResult] =
+    useState<NodeCapabilityProbeSummary | null>(null);
 
   // Self-test results
   const [selfTestSteps, setSelfTestSteps] = useState<SelfTestStep[] | null>(null);
@@ -2614,6 +2635,321 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
                   ))}
                 </div>
               )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Raw Wire Tx Decoder & Node Capability Probe Panel */}
+      <div
+        className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-5"
+        data-testid="raw-tx-and-probe-panel"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
+          <div>
+            <h2 className="text-sm font-semibold text-fg">
+              Raw Wire Tx Decoder &amp; Node Capability Probe
+            </h2>
+            <p className="text-xs text-muted">
+              Decode signed Call transactions offline with RFC 8032 Ed25519 verification and probe any RPC endpoint for network-tag headers, batch support, and latency
+            </p>
+          </div>
+          <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-surface-2 border border-border text-gold">
+            Offline Decode + RPC Probe
+          </span>
+        </div>
+
+        {/* Offline Raw Wire Tx Decoder */}
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-xs font-semibold text-muted uppercase tracking-wider">
+              Offline Raw Wire Tx Decoder
+            </h3>
+            {signedResult?.rawTxHex && (
+              <button
+                type="button"
+                data-testid="load-signed-raw-tx-btn"
+                onClick={() => {
+                  setRawTxHexInput(signedResult.rawTxHex);
+                  setRawTxChainIdStr(String(selectedChainId));
+                  setRawTxInspectError(null);
+                }}
+                className="px-2.5 py-1 text-xs bg-surface-2 hover:bg-border rounded border border-border text-muted hover:text-fg transition-colors"
+              >
+                Load Last Signed Tx
+              </button>
+            )}
+          </div>
+
+          <textarea
+            id="raw-tx-hex-input"
+            data-testid="raw-tx-hex-input"
+            rows={3}
+            value={rawTxHexInput}
+            onChange={(e) => setRawTxHexInput(e.target.value)}
+            placeholder="Paste raw signed Call transaction hex (0x... or bare hex)..."
+            className="w-full bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+          />
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+            <div>
+              <label
+                htmlFor="raw-tx-chain-id-input"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                Chain ID (for sighash)
+              </label>
+              <input
+                id="raw-tx-chain-id-input"
+                data-testid="raw-tx-chain-id-input"
+                type="number"
+                min={0}
+                value={rawTxChainIdStr}
+                onChange={(e) => setRawTxChainIdStr(e.target.value)}
+                placeholder={String(selectedChainId)}
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+
+            <div className="md:col-span-2">
+              <label
+                htmlFor="raw-tx-pubkey-input"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                Signer Public Key Hex Override (optional, defaults to tx sender)
+              </label>
+              <input
+                id="raw-tx-pubkey-input"
+                data-testid="raw-tx-pubkey-input"
+                type="text"
+                value={rawTxPubkeyHex}
+                onChange={(e) => setRawTxPubkeyHex(e.target.value)}
+                placeholder="64-char hex pubkey (optional)"
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              data-testid="decode-raw-tx-btn"
+              onClick={() => {
+                setRawTxInspectError(null);
+                setInspectedRawTx(null);
+                try {
+                  const trimmedChain = rawTxChainIdStr.trim();
+                  const parsedChainId =
+                    trimmedChain.length > 0 ? BigInt(trimmedChain) : BigInt(selectedChainId);
+                  const inspected = inspectRawSignedCallTx(rawTxHexInput, {
+                    chainId: parsedChainId,
+                    publicKeyHex: rawTxPubkeyHex.trim() || undefined,
+                  });
+                  setInspectedRawTx(inspected);
+                } catch (err: unknown) {
+                  if (err instanceof KovanicaDecodeError) {
+                    setRawTxInspectError(`[${err.code}] ${err.message}`);
+                  } else {
+                    setRawTxInspectError(err instanceof Error ? err.message : String(err));
+                  }
+                }
+              }}
+              className="px-4 py-2 bg-gold hover:bg-gold/90 text-bg rounded-lg text-xs font-semibold transition-colors"
+            >
+              Decode &amp; Verify Tx
+            </button>
+          </div>
+
+          {rawTxInspectError && (
+            <div
+              data-testid="raw-tx-decode-error"
+              className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3"
+            >
+              {rawTxInspectError}
+            </div>
+          )}
+
+          {inspectedRawTx && (
+            <div data-testid="raw-tx-decode-result" className="flex flex-col gap-2 text-xs">
+              <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1 text-muted">
+                <span>
+                  Signature:{" "}
+                  <strong
+                    data-testid="raw-tx-sig-status"
+                    className={
+                      inspectedRawTx.signatureValid ? "text-emerald-400" : "text-red-400"
+                    }
+                  >
+                    {inspectedRawTx.signatureValid ? "VALID" : "INVALID"}
+                  </strong>
+                </span>
+                <span>
+                  Method: <strong className="text-gold">{inspectedRawTx.method}</strong>
+                </span>
+                <span>
+                  Nonce: <strong className="text-fg">{inspectedRawTx.nonce}</strong>
+                </span>
+                <span>
+                  Fee: <strong className="text-fg">{inspectedRawTx.fee}</strong>
+                </span>
+                <span>
+                  Size: <strong className="text-fg">{inspectedRawTx.wireSizeBytes}B</strong>
+                </span>
+              </div>
+              <pre
+                data-testid="raw-tx-decode-json"
+                className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto max-h-72"
+              >
+                {JSON.stringify(inspectedRawTx, null, 2)}
+              </pre>
+            </div>
+          )}
+        </div>
+
+        {/* RPC Node Capability Probe */}
+        <div className="flex flex-col gap-3 border-t border-border pt-4">
+          <h3 className="text-xs font-semibold text-muted uppercase tracking-wider">
+            RPC Node Capability Probe
+          </h3>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+            <div className="md:col-span-2">
+              <label
+                htmlFor="node-probe-url-input"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                Target RPC Endpoint URL
+              </label>
+              <input
+                id="node-probe-url-input"
+                data-testid="node-probe-url-input"
+                type="text"
+                value={nodeProbeUrlInput}
+                onChange={(e) => setNodeProbeUrlInput(e.target.value)}
+                placeholder="http://127.0.0.1:8545/rpc"
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="node-probe-expected-chain-input"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                Expected Chain ID (optional)
+              </label>
+              <input
+                id="node-probe-expected-chain-input"
+                data-testid="node-probe-expected-chain-input"
+                type="number"
+                min={0}
+                value={nodeProbeExpectedChainStr}
+                onChange={(e) => setNodeProbeExpectedChainStr(e.target.value)}
+                placeholder="any"
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              data-testid="run-node-probe-btn"
+              disabled={isProbingNode}
+              onClick={async () => {
+                setIsProbingNode(true);
+                setNodeProbeResult(null);
+                try {
+                  const trimmedExpected = nodeProbeExpectedChainStr.trim();
+                  const expectedChainId =
+                    trimmedExpected.length > 0 ? BigInt(trimmedExpected) : undefined;
+                  const res = await runNodeCapabilityProbe(nodeProbeUrlInput.trim(), {
+                    ...(expectedChainId !== undefined ? { expectedChainId } : {}),
+                  });
+                  setNodeProbeResult(res);
+                } catch (err: unknown) {
+                  setNodeProbeResult({
+                    ok: false,
+                    url: nodeProbeUrlInput.trim(),
+                    batchSupported: false,
+                    canonicalTagMatch: null,
+                    latencyMs: 0,
+                    error: err instanceof Error ? err.message : String(err),
+                  });
+                } finally {
+                  setIsProbingNode(false);
+                }
+              }}
+              className="px-4 py-2 bg-gold/20 hover:bg-gold/30 rounded-lg border border-gold/40 text-gold text-xs font-semibold transition-colors disabled:opacity-50"
+            >
+              {isProbingNode ? "Probing Node..." : "Probe Node Capabilities"}
+            </button>
+          </div>
+
+          {nodeProbeResult && (
+            <div data-testid="node-probe-result" className="flex flex-col gap-2 text-xs">
+              <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1 text-muted">
+                <span>
+                  Status:{" "}
+                  <strong
+                    className={
+                      nodeProbeResult.ok ? "text-emerald-400" : "text-red-400"
+                    }
+                  >
+                    {nodeProbeResult.ok ? "OK" : "FAILED"}
+                  </strong>
+                </span>
+                <span>
+                  Network Tag:{" "}
+                  <strong className="text-fg">
+                    {nodeProbeResult.networkTag ?? "—"}
+                  </strong>
+                  {nodeProbeResult.canonicalTagMatch !== null && (
+                    <span
+                      className={
+                        nodeProbeResult.canonicalTagMatch
+                          ? " text-emerald-400"
+                          : " text-red-400"
+                      }
+                    >
+                      {" "}
+                      ({nodeProbeResult.canonicalTagMatch ? "canonical" : "mismatch"})
+                    </span>
+                  )}
+                </span>
+                <span>
+                  RPC Version:{" "}
+                  <strong className="text-fg">
+                    {nodeProbeResult.rpcVersion ?? "—"}
+                  </strong>
+                </span>
+                <span>
+                  Batch:{" "}
+                  <strong
+                    className={
+                      nodeProbeResult.batchSupported ? "text-emerald-400" : "text-amber-400"
+                    }
+                  >
+                    {nodeProbeResult.batchSupported ? "Supported" : "Unsupported"}
+                  </strong>
+                </span>
+                <span>
+                  Latency:{" "}
+                  <strong className="text-gold">{nodeProbeResult.latencyMs} ms</strong>
+                </span>
+              </div>
+
+              {nodeProbeResult.error && (
+                <div className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3">
+                  {nodeProbeResult.error}
+                </div>
+              )}
+
+              <pre
+                data-testid="node-probe-json"
+                className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto max-h-72"
+              >
+                {JSON.stringify(nodeProbeResult, null, 2)}
+              </pre>
             </div>
           )}
         </div>

@@ -6,6 +6,7 @@ import {
   applyFeeBuffer,
   CHAIN_IDS,
   createFailoverClient,
+  decodeSignedCallTransaction,
   dryRunBatchCalls,
   EscrowClient,
   estimateTxFeeWithBuffer,
@@ -16,17 +17,21 @@ import {
   MultisigClient,
   NameRegistryClient,
   NftClient,
+  probeRpcNode,
   readContractStorage,
   sanitizeRpcUrl,
   subscribeContractEvents,
   TokenClient,
   VaultClient,
+  verifyCallTransactionSignature,
+  verifyEd25519,
   waitForTransactionFinality,
 } from "kovanica-sdk";
 import { ALLOWLISTED_METHODS, validateParam } from "../src/methods";
 import {
   applyFeeBuffer as interopApplyFeeBuffer,
   createFailoverClient as interopCreateFailoverClient,
+  decodeSignedCallTransaction as interopDecodeSignedCallTransaction,
   dryRunBatchCalls as interopDryRunBatchCalls,
   EscrowClient as interopEscrowClient,
   estimateTxFeeWithBuffer as interopEstimateTxFeeWithBuffer,
@@ -37,11 +42,14 @@ import {
   MultisigClient as interopMultisigClient,
   NameRegistryClient as interopNameRegistryClient,
   NftClient as interopNftClient,
+  probeRpcNode as interopProbeRpcNode,
   readContractStorage as interopReadContractStorage,
   sanitizeRpcUrl as interopSanitizeRpcUrl,
   subscribeContractEvents as interopSubscribeContractEvents,
   TokenClient as interopTokenClient,
   VaultClient as interopVaultClient,
+  verifyCallTransactionSignature as interopVerifyCallTransactionSignature,
+  verifyEd25519 as interopVerifyEd25519,
   waitForTransactionFinality as interopWaitForTransactionFinality,
 } from "../src/wallet-interop";
 
@@ -51,7 +59,7 @@ describe("Immutable SDK Pin & Traceability", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
     const pinnedSha = pkg?.kovanicaSdk?.testedRevision;
 
-    expect(pinnedSha).toBe("f1aa74ad1e1076316692e801aec86d9c4e8b7c27");
+    expect(pinnedSha).toBe("c6f886d81a0673a563d66f244755cf1e4d0a7ff5");
     expect(pinnedSha).toMatch(/^[0-9a-f]{40}$/);
 
     const ciWorkflow = fs.readFileSync(path.join(rootDir, ".github/workflows/ci.yml"), "utf8");
@@ -94,6 +102,10 @@ describe("Immutable SDK Pin & Traceability", () => {
     expect(distContent).toContain("applyFeeBuffer");
     expect(distContent).toContain("estimateTxFeeWithBuffer");
     expect(distContent).toContain("waitForTransactionFinality");
+    expect(distContent).toContain("decodeSignedCallTransaction");
+    expect(distContent).toContain("verifyCallTransactionSignature");
+    expect(distContent).toContain("verifyEd25519");
+    expect(distContent).toContain("probeRpcNode");
 
     expect(typeof readContractStorage).toBe("function");
     expect(typeof dryRunBatchCalls).toBe("function");
@@ -105,6 +117,10 @@ describe("Immutable SDK Pin & Traceability", () => {
     expect(typeof applyFeeBuffer).toBe("function");
     expect(typeof estimateTxFeeWithBuffer).toBe("function");
     expect(typeof waitForTransactionFinality).toBe("function");
+    expect(typeof decodeSignedCallTransaction).toBe("function");
+    expect(typeof verifyCallTransactionSignature).toBe("function");
+    expect(typeof verifyEd25519).toBe("function");
+    expect(typeof probeRpcNode).toBe("function");
     expect(interopReadContractStorage).toBe(readContractStorage);
     expect(interopDryRunBatchCalls).toBe(dryRunBatchCalls);
     expect(interopGetContractLogHistory).toBe(getContractLogHistory);
@@ -115,6 +131,10 @@ describe("Immutable SDK Pin & Traceability", () => {
     expect(interopApplyFeeBuffer).toBe(applyFeeBuffer);
     expect(interopEstimateTxFeeWithBuffer).toBe(estimateTxFeeWithBuffer);
     expect(interopWaitForTransactionFinality).toBe(waitForTransactionFinality);
+    expect(interopDecodeSignedCallTransaction).toBe(decodeSignedCallTransaction);
+    expect(interopVerifyCallTransactionSignature).toBe(verifyCallTransactionSignature);
+    expect(interopVerifyEd25519).toBe(verifyEd25519);
+    expect(interopProbeRpcNode).toBe(probeRpcNode);
 
     // Assert all 7 typed contract facades + MAX_JSONRPC_BATCH_SIZE are exported and re-exported identically
     expect(MAX_JSONRPC_BATCH_SIZE).toBe(32);
