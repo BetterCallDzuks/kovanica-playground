@@ -1280,3 +1280,342 @@ export async function fetchAndDecodeContractStorageSlot(
     decoded,
   };
 }
+
+// --- Transaction Receipt Poller & Emitted Log Bincode Decoder (`kovanica_getTransactionReceipt`) ---
+
+export interface TransactionReceiptRpcLog {
+  address?: string;
+  topics?: string[];
+  topic?: string;
+  data?: string | Uint8Array | number[];
+  logIndex?: number | string | bigint;
+}
+
+export interface TransactionReceiptRpcPayload {
+  transactionHash?: string;
+  tx_hash?: string;
+  blockHash?: string | null;
+  block_hash?: string | null;
+  blockNumber?: bigint | number | string | null;
+  block_number?: bigint | number | string | null;
+  transactionIndex?: bigint | number | string | null;
+  transaction_index?: bigint | number | string | null;
+  status?: number | bigint | string | boolean;
+  success?: boolean;
+  gasUsed?: bigint | number | string | null;
+  gas_used?: bigint | number | string | null;
+  logs?: Array<TransactionReceiptRpcLog | string | Uint8Array>;
+  events?: Array<TransactionReceiptRpcLog | string | Uint8Array>;
+}
+
+export interface TransactionReceiptRpcClient {
+  getTransactionReceipt?: (
+    hash: string,
+    options?: { signal?: AbortSignal; timeoutMs?: number },
+  ) => Promise<TransactionReceiptRpcPayload | null | undefined>;
+  call?: <TResult = unknown>(
+    method: string,
+    params?: unknown,
+    options?: { signal?: AbortSignal; timeoutMs?: number },
+  ) => Promise<TResult>;
+  transport?: unknown;
+}
+
+export interface PollAndDecodeTransactionReceiptOptions {
+  /** 32-byte (64-hex-character) transaction hash, with or without `0x` prefix. */
+  txHash: string;
+  /** Optional typed Bincode contract state/log decoder kind. */
+  decoderKind?: ContractDecoderKind;
+  /** Polling interval in milliseconds between `kovanica_getTransactionReceipt` calls. Default: `500`. */
+  pollIntervalMs?: number;
+  /** Total polling timeout in milliseconds before rejecting. Default: `15_000`. */
+  timeoutMs?: number;
+  /** Optional cancellation signal. */
+  signal?: AbortSignal;
+}
+
+export interface DecodedReceiptLog {
+  logIndex: number;
+  address?: string;
+  topics?: string[];
+  rawDataHex: string;
+  decoderKind?: ContractDecoderKind;
+  decoded: unknown | null;
+  [key: string]: unknown;
+}
+
+export interface ReceiptLogDecodeError {
+  logIndex: number;
+  rawDataHex: string;
+  decoderKind: ContractDecoderKind;
+  error: string;
+  code?: string;
+}
+
+export interface PollAndDecodeTransactionReceiptResult {
+  receipt: TransactionReceiptRpcPayload;
+  status: "success" | "reverted";
+  gasUsed: bigint;
+  blockHash: string | null;
+  decodedLogs: DecodedReceiptLog[];
+  decodeErrors: ReceiptLogDecodeError[];
+}
+
+function parseReceiptQuantityBigInt(val: unknown): bigint {
+  if (val === null || val === undefined || val === "") {
+    return 0n;
+  }
+  if (typeof val === "bigint") {
+    return val;
+  }
+  if (typeof val === "number") {
+    if (!Number.isFinite(val) || val < 0) return 0n;
+    return BigInt(Math.trunc(val));
+  }
+  if (typeof val === "string") {
+    const trimmed = val.trim();
+    if (!trimmed || trimmed === "0x" || trimmed === "0X") return 0n;
+    return BigInt(trimmed);
+  }
+  return 0n;
+}
+
+function resolveReceiptStatus(receipt: TransactionReceiptRpcPayload): "success" | "reverted" {
+  if (receipt.success === false) {
+    return "reverted";
+  }
+  const rawStatus = receipt.status;
+  if (rawStatus !== undefined && rawStatus !== null) {
+    if (typeof rawStatus === "boolean") {
+      return rawStatus ? "success" : "reverted";
+    }
+    if (typeof rawStatus === "number" || typeof rawStatus === "bigint") {
+      return BigInt(rawStatus) === 0n ? "reverted" : "success";
+    }
+    if (typeof rawStatus === "string") {
+      const lower = rawStatus.trim().toLowerCase();
+      if (lower === "reverted" || lower === "failed" || lower === "0" || lower === "0x0" || lower === "0x00") {
+        return "reverted";
+      }
+      if (lower === "success" || lower === "ok" || lower === "1" || lower === "0x1" || lower === "0x01") {
+        return "success";
+      }
+    }
+  }
+  if (receipt.success === true) {
+    return "success";
+  }
+  return "success";
+}
+
+function normalizeLogDataHex(entry: TransactionReceiptRpcLog | string | Uint8Array): {
+  rawDataHex: string;
+  address?: string;
+  topics?: string[];
+} {
+  if (typeof entry === "string") {
+    const trimmed = entry.trim();
+    const clean = trimmed.startsWith("0x") || trimmed.startsWith("0X") ? trimmed.slice(2) : trimmed;
+    return { rawDataHex: `0x${clean}` };
+  }
+  if (entry instanceof Uint8Array) {
+    return { rawDataHex: `0x${bytesToHex(entry)}` };
+  }
+  let rawDataHex = "0x";
+  if (typeof entry.data === "string") {
+    const trimmed = entry.data.trim();
+    const clean = trimmed.startsWith("0x") || trimmed.startsWith("0X") ? trimmed.slice(2) : trimmed;
+    rawDataHex = `0x${clean}`;
+  } else if (entry.data instanceof Uint8Array) {
+    rawDataHex = `0x${bytesToHex(entry.data)}`;
+  } else if (Array.isArray(entry.data)) {
+    rawDataHex = `0x${bytesToHex(Uint8Array.from(entry.data))}`;
+  }
+  const address = typeof entry.address === "string" ? entry.address : undefined;
+  const topics = Array.isArray(entry.topics)
+    ? entry.topics.map(String)
+    : typeof entry.topic === "string"
+      ? [entry.topic]
+      : undefined;
+  return { rawDataHex, address, topics };
+}
+
+function waitWithSignal(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error("Transaction receipt polling aborted"));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error("Transaction receipt polling aborted"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * Validates a 32-byte hex `txHash`, polls `kovanica_getTransactionReceipt` until a non-null
+ * receipt is returned (or timeout/abort), and decodes any hex `logs` data payloads using
+ * the selected typed Bincode decoder (`decodeContractStateHex`).
+ */
+export async function pollAndDecodeTransactionReceipt(
+  client: TransactionReceiptRpcClient,
+  options: PollAndDecodeTransactionReceiptOptions,
+): Promise<PollAndDecodeTransactionReceiptResult> {
+  const rawTxHash = (options?.txHash ?? "").trim();
+  const cleanHash =
+    rawTxHash.startsWith("0x") || rawTxHash.startsWith("0X")
+      ? rawTxHash.slice(2)
+      : rawTxHash;
+
+  if (!/^[0-9a-fA-F]{64}$/.test(cleanHash)) {
+    throw new KovanicaDecodeError(
+      "INVALID_INPUT",
+      "Transaction hash must be a 32-byte (64-character) hexadecimal string",
+      { field: "txHash" },
+    );
+  }
+
+  const normalizedTxHash = `0x${cleanHash.toLowerCase()}`;
+  const pollIntervalMs = options.pollIntervalMs ?? 500;
+  if (!Number.isFinite(pollIntervalMs) || pollIntervalMs < 0) {
+    throw new RangeError(`pollIntervalMs must be a non-negative number, got ${pollIntervalMs}`);
+  }
+
+  const timeoutMs = options.timeoutMs ?? 15_000;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new RangeError(`timeoutMs must be a positive number, got ${timeoutMs}`);
+  }
+
+  if (options.signal?.aborted) {
+    throw new Error("Transaction receipt polling aborted");
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  let receipt: TransactionReceiptRpcPayload | null | undefined = null;
+
+  const fetchReceiptOnce = async (): Promise<TransactionReceiptRpcPayload | null | undefined> => {
+    const reqOpts = options.signal ? { signal: options.signal } : undefined;
+    // If client is a KovanicaClient instance (with transport & call), prefer client.call("kovanica_getTransactionReceipt")
+    // so raw receipt fields like `logs` / `events` are preserved intact.
+    if (
+      typeof client.call === "function" &&
+      (typeof client.getTransactionReceipt !== "function" || "transport" in client)
+    ) {
+      return client.call<TransactionReceiptRpcPayload | null | undefined>(
+        "kovanica_getTransactionReceipt",
+        [normalizedTxHash],
+        reqOpts,
+      );
+    }
+    if (typeof client.getTransactionReceipt === "function") {
+      return client.getTransactionReceipt(normalizedTxHash, reqOpts);
+    }
+    throw new Error("RPC client must provide getTransactionReceipt() or call()");
+  };
+
+  while (true) {
+    if (options.signal?.aborted) {
+      throw new Error("Transaction receipt polling aborted");
+    }
+
+    receipt = await fetchReceiptOnce();
+    if (receipt !== null && receipt !== undefined) {
+      break;
+    }
+
+    const now = Date.now();
+    const remaining = deadline - now;
+    if (remaining <= 0) {
+      throw new Error(
+        `Timed out waiting for transaction receipt ${normalizedTxHash} after ${timeoutMs}ms`,
+      );
+    }
+
+    await waitWithSignal(Math.min(pollIntervalMs, remaining), options.signal);
+
+    if (Date.now() >= deadline) {
+      // Perform one final check right at deadline before timing out
+      receipt = await fetchReceiptOnce();
+      if (receipt !== null && receipt !== undefined) {
+        break;
+      }
+      throw new Error(
+        `Timed out waiting for transaction receipt ${normalizedTxHash} after ${timeoutMs}ms`,
+      );
+    }
+  }
+
+  const status = resolveReceiptStatus(receipt);
+  const gasUsed = parseReceiptQuantityBigInt(receipt.gasUsed ?? receipt.gas_used);
+  const rawBlockHash = receipt.blockHash ?? receipt.block_hash;
+  const blockHash =
+    typeof rawBlockHash === "string" && rawBlockHash.trim().length > 0
+      ? rawBlockHash.trim()
+      : null;
+
+  const rawLogs = Array.isArray(receipt.logs)
+    ? receipt.logs
+    : Array.isArray(receipt.events)
+      ? receipt.events
+      : [];
+
+  const decodedLogs: DecodedReceiptLog[] = [];
+  const decodeErrors: ReceiptLogDecodeError[] = [];
+
+  for (let i = 0; i < rawLogs.length; i++) {
+    const entry = rawLogs[i];
+    const { rawDataHex, address, topics } = normalizeLogDataHex(entry);
+    const cleanData = rawDataHex.slice(2);
+
+    if (!options.decoderKind || cleanData.length === 0) {
+      decodedLogs.push({
+        logIndex: i,
+        ...(address !== undefined ? { address } : {}),
+        ...(topics !== undefined ? { topics } : {}),
+        rawDataHex,
+        ...(options.decoderKind ? { decoderKind: options.decoderKind } : {}),
+        decoded: null,
+      });
+      continue;
+    }
+
+    try {
+      const decoded = decodeContractStateHex(options.decoderKind, rawDataHex);
+      decodedLogs.push({
+        ...(typeof decoded === "object" && decoded !== null
+          ? (decoded as Record<string, unknown>)
+          : {}),
+        logIndex: i,
+        ...(address !== undefined ? { address } : {}),
+        ...(topics !== undefined ? { topics } : {}),
+        rawDataHex,
+        decoderKind: options.decoderKind,
+        decoded,
+      });
+    } catch (err: unknown) {
+      decodeErrors.push({
+        logIndex: i,
+        rawDataHex,
+        decoderKind: options.decoderKind,
+        error: err instanceof Error ? err.message : String(err),
+        ...(err instanceof KovanicaDecodeError ? { code: err.code } : {}),
+      });
+    }
+  }
+
+  return {
+    receipt,
+    status,
+    gasUsed,
+    blockHash,
+    decodedLogs,
+    decodeErrors,
+  };
+}
+

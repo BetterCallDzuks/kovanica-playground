@@ -32,6 +32,7 @@ import {
   hexToBytes,
   isStorageSlotEmpty,
   KovanicaDecodeError,
+  pollAndDecodeTransactionReceipt,
   runGoldenVectorSelfTest,
   signAndSerializeTransaction,
   u128le,
@@ -848,6 +849,211 @@ describe("Ecosystem HD Wallet & Wasmi Contract Interoperability (PRO-53, PRO-48)
       expect(sdkSnippet).toContain(`args: hexToBytes("${bytesToHex(call.args)}")`);
       expect(sdkSnippet).toContain(`sender: "${accounts[0].testnetAddress}"`);
       expect(sdkSnippet).toContain("chainId: CHAIN_IDS.TESTNET");
+    });
+
+    describe("Transaction Receipt Poller & Emitted Log Bincode Decoder (pollAndDecodeTransactionReceipt)", () => {
+      const validTxHash = "ab".repeat(32);
+      const validBlockHash = "0x" + "cd".repeat(32);
+
+      it("resolves immediately on first poll hit and normalizes status, gasUsed, and blockHash", async () => {
+        let callCount = 0;
+        const res = await pollAndDecodeTransactionReceipt(
+          {
+            getTransactionReceipt: async (hash) => {
+              callCount++;
+              expect(hash).toBe(`0x${validTxHash}`);
+              return {
+                transactionHash: `0x${validTxHash}`,
+                blockHash: validBlockHash,
+                status: 1,
+                success: true,
+                gasUsed: "0x5208",
+                logs: [],
+              };
+            },
+          },
+          {
+            txHash: validTxHash,
+            pollIntervalMs: 10,
+            timeoutMs: 1000,
+          },
+        );
+
+        expect(callCount).toBe(1);
+        expect(res.status).toBe("success");
+        expect(res.gasUsed).toBe(21000n);
+        expect(res.blockHash).toBe(validBlockHash);
+        expect(res.decodedLogs).toEqual([]);
+        expect(res.decodeErrors).toEqual([]);
+      });
+
+      it("polls multiple times until a non-null receipt is returned and decodes typed Bincode logs across decoders", async () => {
+        const owner = hexToBytes("11".repeat(32));
+        const pubkey = hexToBytes("22".repeat(32));
+        const nameLogBytes = concat([
+          owner,
+          pubkey,
+          encodeBincodeStringVec(["https://relay1.kovanica.org"]),
+        ]);
+
+        let attempts = 0;
+        const res = await pollAndDecodeTransactionReceipt(
+          {
+            call: async (method, params) => {
+              expect(method).toBe("kovanica_getTransactionReceipt");
+              expect(params).toEqual([`0x${validTxHash}`]);
+              attempts++;
+              if (attempts < 3) {
+                return null as any;
+              }
+              return {
+                transactionHash: `0x${validTxHash}`,
+                blockHash: validBlockHash,
+                status: "0x1",
+                gasUsed: 48500n,
+                logs: [
+                  {
+                    address: "0x" + "33".repeat(32),
+                    topics: ["0x" + "ff".repeat(32)],
+                    data: `0x${bytesToHex(nameLogBytes)}`,
+                  },
+                ],
+              } as any;
+            },
+          },
+          {
+            txHash: `0x${validTxHash}`,
+            decoderKind: "name",
+            pollIntervalMs: 5,
+            timeoutMs: 1000,
+          },
+        );
+
+        expect(attempts).toBe(3);
+        expect(res.status).toBe("success");
+        expect(res.gasUsed).toBe(48500n);
+        expect(res.blockHash).toBe(validBlockHash);
+        expect(res.decodeErrors).toEqual([]);
+        expect(res.decodedLogs).toHaveLength(1);
+        expect(res.decodedLogs[0].logIndex).toBe(0);
+        expect(res.decodedLogs[0].decoderKind).toBe("name");
+        expect((res.decodedLogs[0].decoded as any).ownerHex).toBe("11".repeat(32));
+        expect((res.decodedLogs[0].decoded as any).pubkeyHex).toBe("22".repeat(32));
+        expect((res.decodedLogs[0].decoded as any).relayEndpoints).toEqual([
+          "https://relay1.kovanica.org",
+        ]);
+
+        // Also test HTLC & Multisig Bincode log decoding + malformed log collection in decodeErrors
+        const multisigLogBytes = concat([
+          encodeBincodeBytes32Vec([owner, pubkey]),
+          u32le(2),
+          u64le(9n),
+        ]);
+
+        const msRes = await pollAndDecodeTransactionReceipt(
+          {
+            getTransactionReceipt: async () => ({
+              transactionHash: `0x${validTxHash}`,
+              blockHash: validBlockHash,
+              status: 1,
+              gasUsed: "12000",
+              logs: [
+                { data: `0x${bytesToHex(multisigLogBytes)}` },
+                { data: "0xdeadbeef" },
+              ],
+            }),
+          },
+          {
+            txHash: validTxHash,
+            decoderKind: "multisig",
+            pollIntervalMs: 5,
+            timeoutMs: 1000,
+          },
+        );
+
+        expect(msRes.decodedLogs).toHaveLength(1);
+        expect((msRes.decodedLogs[0].decoded as any).threshold).toBe(2);
+        expect((msRes.decodedLogs[0].decoded as any).nextTxId).toBe(9n);
+        expect(msRes.decodeErrors).toHaveLength(1);
+        expect(msRes.decodeErrors[0].logIndex).toBe(1);
+        expect(msRes.decodeErrors[0].decoderKind).toBe("multisig");
+      });
+
+      it("detects reverted receipts from status=0 / 0x0 / success=false", async () => {
+        const revertedByZero = await pollAndDecodeTransactionReceipt(
+          {
+            getTransactionReceipt: async () => ({
+              transactionHash: `0x${validTxHash}`,
+              blockHash: validBlockHash,
+              status: 0,
+              success: false,
+              gasUsed: 100000n,
+              logs: [],
+            }),
+          },
+          { txHash: validTxHash },
+        );
+        expect(revertedByZero.status).toBe("reverted");
+        expect(revertedByZero.gasUsed).toBe(100000n);
+
+        const revertedByHexZero = await pollAndDecodeTransactionReceipt(
+          {
+            getTransactionReceipt: async () => ({
+              transactionHash: `0x${validTxHash}`,
+              blockHash: validBlockHash,
+              status: "0x0",
+              gasUsed: "0x2710",
+            }),
+          },
+          { txHash: validTxHash },
+        );
+        expect(revertedByHexZero.status).toBe("reverted");
+        expect(revertedByHexZero.gasUsed).toBe(10000n);
+      });
+
+      it("rejects with a timeout error when receipt stays null past timeoutMs", async () => {
+        let polls = 0;
+        await expect(
+          pollAndDecodeTransactionReceipt(
+            {
+              getTransactionReceipt: async () => {
+                polls++;
+                return null;
+              },
+            },
+            {
+              txHash: validTxHash,
+              pollIntervalMs: 10,
+              timeoutMs: 35,
+            },
+          ),
+        ).rejects.toThrow(/Timed out waiting for transaction receipt/);
+        expect(polls).toBeGreaterThanOrEqual(2);
+      });
+
+      it("rejects invalid 32-byte txHash fail-closed before making any RPC calls", async () => {
+        let rpcCalled = false;
+        const client = {
+          getTransactionReceipt: async () => {
+            rpcCalled = true;
+            return null;
+          },
+        };
+
+        await expect(
+          pollAndDecodeTransactionReceipt(client, { txHash: "" }),
+        ).rejects.toThrow(KovanicaDecodeError);
+
+        await expect(
+          pollAndDecodeTransactionReceipt(client, { txHash: "0x1234" }),
+        ).rejects.toThrow(KovanicaDecodeError);
+
+        await expect(
+          pollAndDecodeTransactionReceipt(client, { txHash: "zz".repeat(32) }),
+        ).rejects.toThrow(KovanicaDecodeError);
+
+        expect(rpcCalled).toBe(false);
+      });
     });
   });
 });

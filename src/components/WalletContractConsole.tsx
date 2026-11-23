@@ -23,12 +23,14 @@ import {
   generateMnemonic,
   hexToBytes,
   KovanicaDecodeError,
+  pollAndDecodeTransactionReceipt,
   runGoldenVectorSelfTest,
   signAndSerializeTransaction,
   validateMnemonic,
   type CallTxKind,
   type ContractDecoderKind,
   type DerivedAccountInfo,
+  type PollAndDecodeTransactionReceiptResult,
   type PreparedContractCallBatch,
   type PreparedCallTransaction,
   type SelfTestStep,
@@ -140,6 +142,14 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
   const [decoderError, setDecoderError] = useState<string | null>(null);
   const [storageEmptyMsg, setStorageEmptyMsg] = useState<string | null>(null);
   const [isFetchingStorage, setIsFetchingStorage] = useState<boolean>(false);
+
+  // Transaction Receipt Poller & Log Decoder state
+  const [receiptTxHash, setReceiptTxHash] = useState<string>("");
+  const [receiptDecoderKind, setReceiptDecoderKind] = useState<ContractDecoderKind | "">("name");
+  const [isPollingReceipt, setIsPollingReceipt] = useState<boolean>(false);
+  const [receiptPollResult, setReceiptPollResult] =
+    useState<PollAndDecodeTransactionReceiptResult | null>(null);
+  const [receiptPollError, setReceiptPollError] = useState<string | null>(null);
 
   // Self-test results
   const [selfTestSteps, setSelfTestSteps] = useState<SelfTestStep[] | null>(null);
@@ -1579,6 +1589,191 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
           >
             {decodedOutput}
           </pre>
+        )}
+      </div>
+
+      {/* Transaction Receipt Poller & Log Decoder (`kovanica_getTransactionReceipt`) */}
+      <div
+        className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-4"
+        data-testid="receipt-poller-panel"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
+          <div>
+            <h2 className="text-sm font-semibold text-fg">
+              Transaction Receipt Poller & Log Decoder (kovanica_getTransactionReceipt)
+            </h2>
+            <p className="text-xs text-muted">
+              Poll <code className="font-mono text-fg">kovanica_getTransactionReceipt</code> until finalized and decode emitted Bincode 1.x log payloads
+            </p>
+          </div>
+          <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-surface-2 border border-border text-gold">
+            kovanica_getTransactionReceipt
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+          <div className="md:col-span-2">
+            <label
+              htmlFor="receipt-tx-hash-input"
+              className="block text-xs font-medium text-muted mb-1"
+            >
+              Transaction Hash (32-byte hex)
+            </label>
+            <input
+              id="receipt-tx-hash-input"
+              data-testid="receipt-tx-hash-input"
+              type="text"
+              value={receiptTxHash}
+              onChange={(e) => setReceiptTxHash(e.target.value)}
+              placeholder="0x... (64 hex characters)"
+              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+            />
+          </div>
+
+          <div>
+            <label
+              htmlFor="receipt-decoder-kind-select"
+              className="block text-xs font-medium text-muted mb-1"
+            >
+              Log Bincode Decoder Type (optional)
+            </label>
+            <select
+              id="receipt-decoder-kind-select"
+              data-testid="receipt-decoder-kind-select"
+              value={receiptDecoderKind}
+              onChange={(e) =>
+                setReceiptDecoderKind(e.target.value as ContractDecoderKind | "")
+              }
+              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+            >
+              <option value="">None (Raw Hex Logs Only)</option>
+              <option value="name">NameRecord — decodeNameRecord</option>
+              <option value="htlc">HtlcRecord — decodeHtlcRecord</option>
+              <option value="escrow">EscrowRecord — decodeEscrowRecord</option>
+              <option value="vault">VaultRecord — decodeVaultRecord</option>
+              <option value="token_metadata">TokenMetadata — decodeTokenMetadata</option>
+              <option value="nft_metadata">NftMetadata — decodeNftMetadata</option>
+              <option value="multisig">MultisigState — decodeMultisigState</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            data-testid="poll-receipt-btn"
+            disabled={isPollingReceipt}
+            onClick={async () => {
+              setReceiptPollError(null);
+              setReceiptPollResult(null);
+              setIsPollingReceipt(true);
+              try {
+                const res = await pollAndDecodeTransactionReceipt(client, {
+                  txHash: receiptTxHash,
+                  decoderKind: receiptDecoderKind || undefined,
+                });
+                setReceiptPollResult(res);
+              } catch (err: unknown) {
+                if (err instanceof KovanicaDecodeError) {
+                  setReceiptPollError(`[${err.code}] ${err.message}`);
+                } else {
+                  setReceiptPollError(
+                    err instanceof Error ? err.message : String(err),
+                  );
+                }
+              } finally {
+                setIsPollingReceipt(false);
+              }
+            }}
+            className="px-4 py-2 bg-gold hover:bg-gold/90 text-bg rounded-lg text-xs font-semibold transition-colors disabled:opacity-50"
+          >
+            {isPollingReceipt
+              ? "Polling Receipt..."
+              : "Fetch / Poll Receipt & Decode Logs"}
+          </button>
+        </div>
+
+        {receiptPollError && (
+          <div
+            data-testid="receipt-poller-error"
+            className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3"
+          >
+            {receiptPollError}
+          </div>
+        )}
+
+        {receiptPollResult && (
+          <div
+            data-testid="receipt-poller-result"
+            className="flex flex-col gap-3 text-xs"
+          >
+            <div
+              data-testid="receipt-poller-summary"
+              className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1.5 text-muted"
+            >
+              <span>
+                Status:{" "}
+                <strong
+                  data-testid="receipt-status-badge"
+                  className={
+                    receiptPollResult.status === "success"
+                      ? "text-emerald-400"
+                      : "text-red-400"
+                  }
+                >
+                  {receiptPollResult.status}
+                </strong>
+              </span>
+              <span>
+                Gas Used:{" "}
+                <strong data-testid="receipt-gas-used" className="text-fg">
+                  {receiptPollResult.gasUsed.toString()}
+                </strong>
+              </span>
+              <span>
+                Block Hash:{" "}
+                <strong
+                  data-testid="receipt-block-hash"
+                  className="text-fg break-all"
+                >
+                  {receiptPollResult.blockHash || "—"}
+                </strong>
+              </span>
+              <span>
+                Decoded Logs:{" "}
+                <strong className="text-gold">
+                  {receiptPollResult.decodedLogs.length}
+                </strong>
+              </span>
+            </div>
+
+            {receiptPollResult.decodedLogs.length > 0 && (
+              <pre
+                data-testid="receipt-decoded-logs"
+                className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto"
+              >
+                {JSON.stringify(
+                  receiptPollResult.decodedLogs,
+                  (_key, value) =>
+                    typeof value === "bigint" ? value.toString() : value,
+                  2,
+                )}
+              </pre>
+            )}
+
+            {receiptPollResult.decodeErrors.length > 0 && (
+              <div
+                data-testid="receipt-decode-errors"
+                className="text-xs font-mono text-amber-300 bg-amber-950/30 border border-amber-800/50 rounded-lg p-3"
+              >
+                {receiptPollResult.decodeErrors.map((e) => (
+                  <div key={e.logIndex}>
+                    Log #{e.logIndex} ({e.decoderKind}): {e.error}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         )}
       </div>
 
