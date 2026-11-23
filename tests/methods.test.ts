@@ -11,7 +11,7 @@ describe("Immutable SDK Pin & Traceability", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
     const pinnedSha = pkg?.kovanicaSdk?.testedRevision;
 
-    expect(pinnedSha).toBe("146cd10a6cd604c65bda81bd633c0ae1e1a619ab");
+    expect(pinnedSha).toBe("e8929d190983cc13121666654966c78316937868");
     expect(pinnedSha).toMatch(/^[0-9a-f]{40}$/);
 
     const ciWorkflow = fs.readFileSync(path.join(rootDir, ".github/workflows/ci.yml"), "utf8");
@@ -30,7 +30,11 @@ describe("Immutable SDK Pin & Traceability", () => {
     expect(distContent).toContain("neither result nor error member present");
     expect(distContent).toContain("KovanicaWsClient");
     expect(distContent).toContain("estimateAndBuildCall");
+    expect(distContent).toContain("estimateBatchCalls");
     expect(distContent).toContain("decodeEscrowRecord");
+    expect(distContent).toContain("decodeContractLog");
+    expect(distContent).toContain("waitForTransactionReceipt");
+    expect(distContent).toContain("decodeTransactionReceiptLogs");
 
     const markerPath = path.join(installedSdkDir, ".tested-revision");
     if (fs.existsSync(markerPath)) {

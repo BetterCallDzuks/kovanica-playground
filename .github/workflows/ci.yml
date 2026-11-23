@@ -23,7 +23,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: BetterCallDzuks/kovanica-sdk
-          ref: 146cd10a6cd604c65bda81bd633c0ae1e1a619ab
+          ref: e8929d190983cc13121666654966c78316937868
           path: kovanica-sdk
 
       - name: Use Node.js ${{ matrix.node-version }}

@@ -8,18 +8,21 @@ import {
   bip39Seed,
   CHAIN_IDS,
   decodeAddress,
+  decodeContractLog,
   decodeEscrowRecord,
   decodeHtlcRecord,
   decodeMultisigState,
   decodeNameRecord,
   decodeNftMetadata,
   decodeTokenMetadata,
+  decodeTransactionReceiptLogs,
   decodeVaultRecord,
   deriveBip44,
   derivePrefixedStorageSlot,
   deriveStorageSlotHex,
   encodeAddress,
   estimateAndBuildCall,
+  estimateBatchCalls,
   estimateCallTxSize,
   formatBip44Path,
   getPublicKey,
@@ -27,10 +30,23 @@ import {
   KovanicaDecodeError,
   TESTNET_ADDRESS_PREFIX,
   toHexQuantity,
+  waitForTransactionReceipt,
+  type ContractLogKind,
+  type ContractLogKindResolver,
+  type DecodedContractLog,
+  type DecodedContractLogByKind,
+  type DecodedTransactionReceiptLog,
+  type DecodedTransactionReceiptLogByKind,
   type EstimateAndBuildCallClient,
   type EstimateAndBuildCallOptions,
+  type EstimateBatchCallsOptions,
+  type PreparedBatchCallTransactions,
   type PreparedCallTransaction,
+  type ReceiptLogEntry,
+  type ReceiptWithLogs,
   type StorageSlotContract,
+  type WaitForTransactionReceiptClient,
+  type WaitForTransactionReceiptOptions,
 } from "kovanica-sdk";
 
 // Configure ed25519 sha512 provider
@@ -711,15 +727,31 @@ export function runGoldenVectorSelfTest(): { ok: boolean; steps: SelfTestStep[] 
 // --- SDK v0.4.0 Fee/Gas Estimation & Typed Bincode State Decoders ---
 
 export {
+  decodeContractLog,
+  decodeTransactionReceiptLogs,
   derivePrefixedStorageSlot,
   deriveStorageSlotHex,
   estimateAndBuildCall,
+  estimateBatchCalls,
   estimateCallTxSize,
   KovanicaDecodeError,
+  waitForTransactionReceipt,
+  type ContractLogKind,
+  type ContractLogKindResolver,
+  type DecodedContractLog,
+  type DecodedContractLogByKind,
+  type DecodedTransactionReceiptLog,
+  type DecodedTransactionReceiptLogByKind,
   type EstimateAndBuildCallClient,
   type EstimateAndBuildCallOptions,
+  type EstimateBatchCallsOptions,
+  type PreparedBatchCallTransactions,
   type PreparedCallTransaction,
+  type ReceiptLogEntry,
+  type ReceiptWithLogs,
   type StorageSlotContract,
+  type WaitForTransactionReceiptClient,
+  type WaitForTransactionReceiptOptions,
 };
 
 export interface EstimateContractCallBatchOptions {
@@ -1285,9 +1317,9 @@ export async function fetchAndDecodeContractStorageSlot(
 
 export interface TransactionReceiptRpcLog {
   address?: string;
-  topics?: string[];
+  topics?: ReadonlyArray<string>;
   topic?: string;
-  data?: string | Uint8Array | number[];
+  data?: string | Uint8Array | ReadonlyArray<number>;
   logIndex?: number | string | bigint;
 }
 
@@ -1304,8 +1336,8 @@ export interface TransactionReceiptRpcPayload {
   success?: boolean;
   gasUsed?: bigint | number | string | null;
   gas_used?: bigint | number | string | null;
-  logs?: Array<TransactionReceiptRpcLog | string | Uint8Array>;
-  events?: Array<TransactionReceiptRpcLog | string | Uint8Array>;
+  logs?: ReadonlyArray<TransactionReceiptRpcLog | string | Uint8Array>;
+  events?: ReadonlyArray<TransactionReceiptRpcLog | string | Uint8Array>;
 }
 
 export interface TransactionReceiptRpcClient {
