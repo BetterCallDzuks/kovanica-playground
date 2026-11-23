@@ -626,7 +626,7 @@ export default function App() {
 
         {/* HD Wallet & Wasmi Contract Console (PRO-53 & PRO-48) */}
         <div className={mainTab === "wallet" ? "block" : "hidden"}>
-          <WalletContractConsole client={client} selectedChainId={selectedChainId} />
+          <WalletContractConsole client={client} selectedChainId={selectedChainId} rpcUrl={rpcUrl} />
         </div>
 
         {/* WebSocket Event Stream Console */}

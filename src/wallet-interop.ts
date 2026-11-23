@@ -26,6 +26,7 @@ import {
   KOVANICA_COIN_TYPE,
   KovanicaDecodeError,
   TESTNET_ADDRESS_PREFIX,
+  toHexQuantity,
   type EstimateAndBuildCallClient,
   type EstimateAndBuildCallOptions,
   type PreparedCallTransaction,
@@ -721,6 +722,51 @@ export {
   type StorageSlotContract,
 };
 
+export interface EstimateContractCallBatchOptions {
+  /**
+   * Optional sender address (PRO-21 `kvnc...dag` / `tknc...dag` or 32-byte hex).
+   * When provided and `startNonce` is omitted, fetches the sender's current nonce once via `client.getNonce(sender)`.
+   */
+  sender?: string;
+  /**
+   * Explicit starting nonce override for the first call in the batch (`calls[0]`).
+   * Subsequent calls receive sequential nonces `startNonce + BigInt(i)`.
+   * Skips the `client.getNonce` RPC call when provided.
+   */
+  startNonce?: bigint | number;
+  /**
+   * Explicit fee rate override in atoms per byte. Skips the `client.estimateFee` RPC call when provided.
+   */
+  feeRatePerByte?: bigint | number;
+  /**
+   * Fee safety margin in basis points (`10_000` = 1.0x, `12_000` = +20%).
+   * Default: `12_000` (+20%).
+   */
+  feeMarginBps?: number;
+  /**
+   * Minimum fee floor per individual call in atoms. Default: `0n`.
+   */
+  minFeePerCall?: bigint | number;
+  /**
+   * Optional maximum aggregate fee cap across the entire batch in atoms.
+   */
+  maxTotalFee?: bigint | number;
+  /**
+   * Chain ID to attach to each prepared call transaction and the batch result. Default: `CHAIN_IDS.MAINNET`.
+   */
+  chainId?: number;
+}
+
+export interface PreparedContractCallBatch {
+  calls: PreparedCallTransaction[];
+  totalFee: bigint;
+  totalGasLimit: bigint;
+  totalEstimatedTxSize: number;
+  feeRatePerByte: bigint;
+  startNonce?: bigint;
+  chainId: number;
+}
+
 export type ContractDecoderKind =
   | "name"
   | "htlc"
@@ -750,6 +796,307 @@ export async function estimateContractCall(
     },
     options,
   );
+}
+
+/**
+ * Estimates fee, gas limit, per-call wire size, sequential nonces (`startNonce + i`),
+ * single fee-rate lookup (`kovanica_estimateFee`), and aggregate batch totals for 1+
+ * Wasmi contract calls.
+ */
+export async function estimateContractCallBatch(
+  client: EstimateAndBuildCallClient,
+  calls: ReadonlyArray<CallTxKind>,
+  options: EstimateContractCallBatchOptions = {},
+): Promise<PreparedContractCallBatch> {
+  if (!Array.isArray(calls) || calls.length === 0) {
+    throw new RangeError("estimateContractCallBatch requires a non-empty array of calls");
+  }
+
+  const feeMarginBps = options.feeMarginBps ?? 12_000;
+  if (!Number.isInteger(feeMarginBps) || feeMarginBps < 10_000) {
+    throw new RangeError(
+      `feeMarginBps must be an integer >= 10000 (1.0x), got ${feeMarginBps}`,
+    );
+  }
+  const marginBpsBig = BigInt(feeMarginBps);
+
+  const minFeePerCall =
+    options.minFeePerCall !== undefined ? BigInt(options.minFeePerCall) : 0n;
+  if (minFeePerCall < 0n) {
+    throw new RangeError(`minFeePerCall must be non-negative, got ${minFeePerCall}`);
+  }
+
+  const maxTotalFee =
+    options.maxTotalFee !== undefined ? BigInt(options.maxTotalFee) : undefined;
+  if (maxTotalFee !== undefined && maxTotalFee < 0n) {
+    throw new RangeError(`maxTotalFee must be non-negative, got ${maxTotalFee}`);
+  }
+
+  let explicitStartNonce: bigint | undefined;
+  if (options.startNonce !== undefined) {
+    explicitStartNonce = BigInt(options.startNonce);
+    if (explicitStartNonce < 0n) {
+      throw new RangeError(`startNonce must be non-negative, got ${explicitStartNonce}`);
+    }
+  }
+
+  let explicitFeeRate: bigint | undefined;
+  if (options.feeRatePerByte !== undefined) {
+    explicitFeeRate = BigInt(options.feeRatePerByte);
+    if (explicitFeeRate < 0n) {
+      throw new RangeError(
+        `feeRatePerByte must be non-negative, got ${explicitFeeRate}`,
+      );
+    }
+  }
+
+  // Validate wire size for all calls fail-closed before any RPC I/O
+  const precomputedSizes: number[] = calls.map((c, idx) => {
+    if (!c || typeof c !== "object") {
+      throw new TypeError(`Call at index ${idx} must be a valid call object`);
+    }
+    return estimateCallTxSize({
+      contract: c.contract,
+      method: c.method,
+      args: c.args,
+      call_value: c.value,
+      gas_limit: c.gasLimit,
+    });
+  });
+
+  const needsFeeEstimate = explicitFeeRate === undefined;
+  const needsNonce =
+    explicitStartNonce === undefined && options.sender !== undefined;
+
+  const [fetchedFeeRate, fetchedNonce] = await Promise.all([
+    needsFeeEstimate ? client.estimateFee() : Promise.resolve(undefined),
+    needsNonce ? client.getNonce(options.sender!) : Promise.resolve(undefined),
+  ]);
+
+  const feeRatePerByte = explicitFeeRate ?? fetchedFeeRate!;
+  if (feeRatePerByte < 0n) {
+    throw new RangeError(
+      `Estimated fee rate must be non-negative, got ${feeRatePerByte}`,
+    );
+  }
+
+  const startNonce = explicitStartNonce ?? fetchedNonce;
+  if (startNonce !== undefined && startNonce < 0n) {
+    throw new RangeError(`Fetched startNonce must be non-negative, got ${startNonce}`);
+  }
+
+  const chainId = options.chainId ?? CHAIN_IDS.MAINNET;
+  const preparedCalls: PreparedCallTransaction[] = [];
+  let totalFee = 0n;
+  let totalGasLimit = 0n;
+  let totalEstimatedTxSize = 0;
+
+  for (let i = 0; i < calls.length; i++) {
+    const c = calls[i];
+    const estimatedTxSize = precomputedSizes[i];
+    const baseFee = feeRatePerByte * BigInt(estimatedTxSize);
+    const marginedFee =
+      baseFee === 0n ? 0n : (baseFee * marginBpsBig + 9_999n) / 10_000n;
+    const fee = marginedFee < minFeePerCall ? minFeePerCall : marginedFee;
+    const nonce = startNonce !== undefined ? startNonce + BigInt(i) : undefined;
+
+    const prepared = await estimateAndBuildCall(
+      client,
+      {
+        contract: c.contract,
+        method: c.method,
+        args: c.args,
+        call_value: c.value,
+        gas_limit: c.gasLimit,
+      },
+      {
+        fee,
+        nonce,
+        chainId,
+      },
+    );
+
+    const preparedWithRate: PreparedCallTransaction = {
+      ...prepared,
+      feeRatePerByte,
+    };
+
+    totalFee += preparedWithRate.fee;
+    totalGasLimit += preparedWithRate.gasLimit;
+    totalEstimatedTxSize += preparedWithRate.estimatedTxSize;
+    preparedCalls.push(preparedWithRate);
+  }
+
+  if (maxTotalFee !== undefined && totalFee > maxTotalFee) {
+    throw new RangeError(
+      `Computed batch totalFee ${totalFee} exceeds maxTotalFee ${maxTotalFee}`,
+    );
+  }
+
+  return {
+    calls: preparedCalls,
+    totalFee,
+    totalGasLimit,
+    totalEstimatedTxSize,
+    feeRatePerByte,
+    startNonce,
+    chainId,
+  };
+}
+
+// --- Developer Code Exporters (`cURL` + `kovanica-sdk` TypeScript Snippets) ---
+
+export interface PlaygroundCallCurlSnippetOptions {
+  rpcUrl: string;
+  call: CallTxKind;
+  sender?: string;
+}
+
+export interface PlaygroundCallSdkSnippetOptions {
+  rpcUrl: string;
+  call: CallTxKind;
+  sender?: string;
+  chainId?: number;
+}
+
+function resolveContractCanonicalAddress(contract: Uint8Array | string): string {
+  if (contract instanceof Uint8Array) {
+    if (contract.length !== 32) {
+      throw new Error(`Expected 32-byte contract address, got ${contract.length}`);
+    }
+    return encodeAddress(contract, ADDRESS_PREFIX);
+  }
+  const trimmed = contract.trim();
+  if (trimmed.startsWith("kvnc") || trimmed.startsWith("tknc")) {
+    const pub = decodeAddress(trimmed);
+    return encodeAddress(pub, ADDRESS_PREFIX);
+  }
+  const bytes = hexToBytes(trimmed);
+  if (bytes.length !== 32) {
+    throw new Error(`Expected 32-byte contract address, got ${bytes.length}`);
+  }
+  return encodeAddress(bytes, ADDRESS_PREFIX);
+}
+
+function resolveContractHex(contract: Uint8Array | string): string {
+  if (contract instanceof Uint8Array) {
+    return bytesToHex(contract);
+  }
+  const trimmed = contract.trim();
+  if (trimmed.startsWith("kvnc") || trimmed.startsWith("tknc")) {
+    return bytesToHex(decodeAddress(trimmed));
+  }
+  return trimmed.startsWith("0x") || trimmed.startsWith("0X") ? trimmed.slice(2) : trimmed;
+}
+
+/**
+ * Generates a ready-to-run JSON-RPC `curl` command invoking `kovanica_call` for the
+ * active Wasmi smart contract call.
+ */
+export function buildPlaygroundCallCurlSnippet(
+  options: PlaygroundCallCurlSnippetOptions,
+): string {
+  const rpcUrl = options.rpcUrl.trim() || "http://127.0.0.1:8545/rpc";
+  const toAddress = resolveContractCanonicalAddress(options.call.contract);
+  const dataHex = `0x${bytesToHex(options.call.args)}`;
+  const valueHex = toHexQuantity(options.call.value);
+  const gasHex = toHexQuantity(options.call.gasLimit);
+
+  const callObj: Record<string, string> = {
+    to: toAddress,
+    entry: options.call.method,
+    method: options.call.method,
+    data: dataHex,
+    value: valueHex,
+    gas: gasHex,
+  };
+
+  if (options.sender && options.sender.trim().length > 0) {
+    const trimmedSender = options.sender.trim();
+    try {
+      const senderPub =
+        trimmedSender.startsWith("kvnc") || trimmedSender.startsWith("tknc")
+          ? decodeAddress(trimmedSender)
+          : hexToBytes(trimmedSender);
+      callObj.from = encodeAddress(senderPub, ADDRESS_PREFIX);
+    } catch {
+      callObj.from = trimmedSender;
+    }
+  }
+
+  const payload = JSON.stringify(
+    {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "kovanica_call",
+      params: [callObj],
+    },
+    null,
+    2,
+  );
+
+  const escapedPayload = payload.replace(/'/g, "'\\''");
+  return [
+    `curl -sS -X POST ${JSON.stringify(rpcUrl)} \\`,
+    `  -H "Content-Type: application/json" \\`,
+    `  -d '${escapedPayload}'`,
+  ].join("\n");
+}
+
+/**
+ * Generates a ready-to-run TypeScript `kovanica-sdk` snippet (`KovanicaClient` +
+ * `estimateAndBuildCall` + `dryRunCall`) for the active Wasmi smart contract call.
+ */
+export function buildPlaygroundCallSdkSnippet(
+  options: PlaygroundCallSdkSnippetOptions,
+): string {
+  const rpcUrl = options.rpcUrl.trim() || "http://127.0.0.1:8545/rpc";
+  const contractHex = resolveContractHex(options.call.contract);
+  const argsHex = bytesToHex(options.call.args);
+  const chainId = options.chainId ?? CHAIN_IDS.TESTNET;
+  const chainExpr =
+    chainId === CHAIN_IDS.MAINNET
+      ? "CHAIN_IDS.MAINNET"
+      : chainId === CHAIN_IDS.TESTNET
+        ? "CHAIN_IDS.TESTNET"
+        : chainId === CHAIN_IDS.DEVNET
+          ? "CHAIN_IDS.DEVNET"
+          : String(chainId);
+
+  const senderLine =
+    options.sender && options.sender.trim().length > 0
+      ? `  sender: ${JSON.stringify(options.sender.trim())},\n`
+      : "";
+
+  return [
+    `import {`,
+    `  CHAIN_IDS,`,
+    `  KovanicaClient,`,
+    `  dryRunCall,`,
+    `  estimateAndBuildCall,`,
+    `  hexToBytes,`,
+    `} from "kovanica-sdk";`,
+    ``,
+    `const client = new KovanicaClient({ url: ${JSON.stringify(rpcUrl)} });`,
+    ``,
+    `const call = {`,
+    `  contract: "0x${contractHex}",`,
+    `  method: ${JSON.stringify(options.call.method)},`,
+    `  args: hexToBytes("${argsHex}"),`,
+    `  call_value: ${options.call.value.toString()}n,`,
+    `  gas_limit: ${options.call.gasLimit.toString()}n,`,
+    `};`,
+    ``,
+    `// 1. Estimate fee (+20% margin), wire size, gas limit, and sender nonce`,
+    `const prepared = await estimateAndBuildCall(client, call, {`,
+    `${senderLine}  chainId: ${chainExpr},`,
+    `});`,
+    `console.log("Estimated fee (atoms):", prepared.fee, "Wire size (B):", prepared.estimatedTxSize);`,
+    ``,
+    `// 2. Optional read-only simulation via kovanica_call`,
+    `const simulation = await dryRunCall(client, prepared.call);`,
+    `console.log("Dry-run result hex:", simulation.rawHex);`,
+  ].join("\n");
 }
 
 /**
