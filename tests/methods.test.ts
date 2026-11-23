@@ -2,11 +2,31 @@ import fs from "node:fs";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
-import { CHAIN_IDS, dryRunBatchCalls, readContractStorage } from "kovanica-sdk";
+import {
+  CHAIN_IDS,
+  dryRunBatchCalls,
+  EscrowClient,
+  HtlcClient,
+  MAX_JSONRPC_BATCH_SIZE,
+  MultisigClient,
+  NameRegistryClient,
+  NftClient,
+  readContractStorage,
+  TokenClient,
+  VaultClient,
+} from "kovanica-sdk";
 import { ALLOWLISTED_METHODS, validateParam } from "../src/methods";
 import {
   dryRunBatchCalls as interopDryRunBatchCalls,
+  EscrowClient as interopEscrowClient,
+  HtlcClient as interopHtlcClient,
+  MAX_JSONRPC_BATCH_SIZE as interopMaxJsonRpcBatchSize,
+  MultisigClient as interopMultisigClient,
+  NameRegistryClient as interopNameRegistryClient,
+  NftClient as interopNftClient,
   readContractStorage as interopReadContractStorage,
+  TokenClient as interopTokenClient,
+  VaultClient as interopVaultClient,
 } from "../src/wallet-interop";
 
 describe("Immutable SDK Pin & Traceability", () => {
@@ -15,7 +35,7 @@ describe("Immutable SDK Pin & Traceability", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
     const pinnedSha = pkg?.kovanicaSdk?.testedRevision;
 
-    expect(pinnedSha).toBe("a2ec93f33bb89780952c9b7b62cca3019e929413");
+    expect(pinnedSha).toBe("e5f3b79bb32801816d3e48d2a30a3f7a566cb6ee");
     expect(pinnedSha).toMatch(/^[0-9a-f]{40}$/);
 
     const ciWorkflow = fs.readFileSync(path.join(rootDir, ".github/workflows/ci.yml"), "utf8");
@@ -28,7 +48,7 @@ describe("Immutable SDK Pin & Traceability", () => {
     const distIndexPath = path.join(installedSdkDir, "dist", "index.js");
     expect(fs.existsSync(distIndexPath)).toBe(true);
 
-    // Confirm the compiled bundle includes the SDK transport contract & v0.4.0 features
+    // Confirm the compiled bundle includes the SDK transport contract, typed facades & JSON-RPC batch transport
     const distContent = fs.readFileSync(distIndexPath, "utf8");
     expect(distContent).toContain("JSON-RPC response ID mismatch");
     expect(distContent).toContain("neither result nor error member present");
@@ -41,11 +61,38 @@ describe("Immutable SDK Pin & Traceability", () => {
     expect(distContent).toContain("decodeTransactionReceiptLogs");
     expect(distContent).toContain("readContractStorage");
     expect(distContent).toContain("dryRunBatchCalls");
+    expect(distContent).toContain("MAX_JSONRPC_BATCH_SIZE");
+    expect(distContent).toContain("callBatch");
+    expect(distContent).toContain("NameRegistryClient");
+    expect(distContent).toContain("TokenClient");
+    expect(distContent).toContain("EscrowClient");
+    expect(distContent).toContain("HtlcClient");
+    expect(distContent).toContain("NftClient");
+    expect(distContent).toContain("VaultClient");
+    expect(distContent).toContain("MultisigClient");
 
     expect(typeof readContractStorage).toBe("function");
     expect(typeof dryRunBatchCalls).toBe("function");
     expect(interopReadContractStorage).toBe(readContractStorage);
     expect(interopDryRunBatchCalls).toBe(dryRunBatchCalls);
+
+    // Assert all 7 typed contract facades + MAX_JSONRPC_BATCH_SIZE are exported and re-exported identically
+    expect(MAX_JSONRPC_BATCH_SIZE).toBe(32);
+    expect(interopMaxJsonRpcBatchSize).toBe(MAX_JSONRPC_BATCH_SIZE);
+    expect(typeof NameRegistryClient).toBe("function");
+    expect(typeof TokenClient).toBe("function");
+    expect(typeof EscrowClient).toBe("function");
+    expect(typeof HtlcClient).toBe("function");
+    expect(typeof NftClient).toBe("function");
+    expect(typeof VaultClient).toBe("function");
+    expect(typeof MultisigClient).toBe("function");
+    expect(interopNameRegistryClient).toBe(NameRegistryClient);
+    expect(interopTokenClient).toBe(TokenClient);
+    expect(interopEscrowClient).toBe(EscrowClient);
+    expect(interopHtlcClient).toBe(HtlcClient);
+    expect(interopNftClient).toBe(NftClient);
+    expect(interopVaultClient).toBe(VaultClient);
+    expect(interopMultisigClient).toBe(MultisigClient);
 
     const markerPath = path.join(installedSdkDir, ".tested-revision");
     if (fs.existsSync(markerPath)) {
