@@ -40,6 +40,7 @@ import {
   probeFailoverRpcEndpoints,
   runContractLogHistoryQuery,
   runGoldenVectorSelfTest,
+  runMempoolFeeTierProbe,
   runNodeCapabilityProbe,
   runTypedFacadeRead,
   signAndSerializeTransaction,
@@ -59,6 +60,7 @@ import {
   type InspectedSignedTxAuto,
   type JsonRpcBatchRequestItem,
   type JsonRpcReadBatchSummary,
+  type MempoolFeeTierProbeResult,
   type NodeCapabilityProbeSummary,
   type PollAndDecodeTransactionReceiptResult,
   type PreparedContractCallBatch,
@@ -276,6 +278,12 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
     inspectedTx: InspectedSignedTxAuto | null;
   } | null>(null);
   const [airgapDecodeError, setAirgapDecodeError] = useState<string | null>(null);
+
+  // Mempool Fee-Tier Estimator state
+  const [isProbingMempoolFees, setIsProbingMempoolFees] = useState<boolean>(false);
+  const [mempoolFeeResult, setMempoolFeeResult] =
+    useState<MempoolFeeTierProbeResult | null>(null);
+  const [mempoolFeeError, setMempoolFeeError] = useState<string | null>(null);
 
   // Self-test results
   const [selfTestSteps, setSelfTestSteps] = useState<SelfTestStep[] | null>(null);
@@ -775,6 +783,20 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
       setBroadcastStatus(`Broadcast accepted! Transaction hash: ${hash}`);
     } catch (err: any) {
       setBroadcastStatus(`Broadcast error: ${err?.message || String(err)}`);
+    }
+  };
+
+  const handleProbeMempoolFees = async () => {
+    setMempoolFeeError(null);
+    setIsProbingMempoolFees(true);
+    try {
+      const result = await runMempoolFeeTierProbe(client);
+      setMempoolFeeResult(result);
+    } catch (err: unknown) {
+      setMempoolFeeResult(null);
+      setMempoolFeeError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsProbingMempoolFees(false);
     }
   };
 
@@ -3688,6 +3710,99 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
             </div>
           )}
         </div>
+      </div>
+
+      {/* Mempool Fee-Tier Estimator (kovanica_mempoolStats) */}
+      <div
+        data-testid="mempool-fee-tier-panel"
+        className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-4"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3">
+          <div>
+            <h2 className="text-sm font-semibold text-fg">
+              Mempool Fee-Tier Estimator (<code>kovanica_mempoolStats</code>)
+            </h2>
+            <p className="text-xs text-muted">
+              Live economy, standard, and priority fee-per-byte tiers via kovanica-sdk v0.5.0
+              (gracefully falls back to <code>kovanica_estimateFee</code> when empty or unsupported)
+            </p>
+          </div>
+          <button
+            type="button"
+            data-testid="probe-mempool-fees-btn"
+            disabled={isProbingMempoolFees}
+            onClick={handleProbeMempoolFees}
+            className="px-4 py-2 bg-gold/20 hover:bg-gold/30 disabled:opacity-50 rounded-lg border border-gold/40 text-gold text-xs font-semibold transition-colors"
+          >
+            {isProbingMempoolFees ? "Probing..." : "Refresh Fee Tiers"}
+          </button>
+        </div>
+
+        {mempoolFeeError && (
+          <div
+            data-testid="mempool-fee-tier-error"
+            className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3"
+          >
+            {mempoolFeeError}
+          </div>
+        )}
+
+        {mempoolFeeResult && (
+          <div data-testid="mempool-fee-tier-result" className="flex flex-col gap-3 text-xs">
+            <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1 text-muted">
+              <span>
+                Source:{" "}
+                <strong data-testid="mempool-fee-source" className="text-gold uppercase">
+                  {mempoolFeeResult.source}
+                </strong>
+              </span>
+              <span>
+                Pending Txs:{" "}
+                <strong className="text-fg">{mempoolFeeResult.pendingCount}</strong>
+              </span>
+              <span>
+                Mempool Size:{" "}
+                <strong className="text-fg">{mempoolFeeResult.totalBytes} B</strong>
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="bg-surface-2 border border-border rounded-lg p-3 flex flex-col gap-1">
+                <span className="text-[11px] uppercase tracking-wider text-muted font-semibold">
+                  Economy
+                </span>
+                <span
+                  data-testid="mempool-fee-economy"
+                  className="text-sm font-mono font-semibold text-fg"
+                >
+                  {mempoolFeeResult.economyAtoms} atoms/B
+                </span>
+              </div>
+              <div className="bg-surface-2 border border-gold/40 rounded-lg p-3 flex flex-col gap-1">
+                <span className="text-[11px] uppercase tracking-wider text-gold font-semibold">
+                  Standard
+                </span>
+                <span
+                  data-testid="mempool-fee-standard"
+                  className="text-sm font-mono font-semibold text-gold"
+                >
+                  {mempoolFeeResult.standardAtoms} atoms/B
+                </span>
+              </div>
+              <div className="bg-surface-2 border border-border rounded-lg p-3 flex flex-col gap-1">
+                <span className="text-[11px] uppercase tracking-wider text-emerald-400 font-semibold">
+                  Priority
+                </span>
+                <span
+                  data-testid="mempool-fee-priority"
+                  className="text-sm font-mono font-semibold text-emerald-300"
+                >
+                  {mempoolFeeResult.priorityAtoms} atoms/B
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Self-Test & Invariant Verification Suite */}

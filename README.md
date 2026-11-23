@@ -43,22 +43,31 @@ Kovanica Playground reflects the established Kovanica design system:
    - Aborts in-flight requests when switching methods or endpoints.
    - Instantly clears stale network and mining diagnostics upon endpoint change, and discards delayed in-flight responses from prior endpoints.
 
+5. **Interactive Developer Studios (`kovanica-sdk v0.5.0`):**
+   - **Typed Contract Facades Studio:** Direct read workflows across all 7 canonical Wasmi contract clients (`NameRegistryClient`, `TokenClient`, `EscrowClient`, `HtlcClient`, `NftClient`, `VaultClient`, `MultisigClient`), BLAKE3 storage slot derivation, and typed Bincode state decoding.
+   - **Inline WS Bincode Log Decoder:** Live WebSocket subscription console (`KovanicaWsClient`) with inline Bincode contract event decoding and reconnection diagnostics.
+   - **Contract Log History & Failover RPC Tester:** Chunked `getContractLogHistory` queries alongside a `FailoverHttpTransport` multi-endpoint health and automatic failover probe.
+   - **Raw Wire Tx Decoder & Node Capability Probe:** Offline Wasmi Call transaction decoding & Ed25519 signature verification (`decodeSignedCallTransaction`, `verifyCallTransactionSignature`) paired with `probeRpcNode` capability, batch-support, and canonical network-tag checks.
+   - **Address Inspector & Transfer Tx Verifier:** Chain-aware PRO-21 / legacy address validation (`inspectAddress`) plus offline native Transfer transaction decoding and signature verification (`decodeSignedTransferTransaction`, `verifyTransferTransactionSignature`).
+   - **Universal Tx Auto-Decoder & Air-Gap Envelope Studio:** Automatic Transfer/Call variant detection (`peekTransactionVariant`, `decodeSignedTransactionAuto`, `verifySignedTransactionAuto`) and `kvnc-tx:v1:` BLAKE3-checksummed air-gap envelope wrapping and verification.
+   - **Mempool Fee-Tier Estimator (`kovanica_mempoolStats`):** Live `economy`, `standard`, and `priority` fee-per-byte recommendations powered by `kovanica-sdk v0.5.0` (`parseMempoolFeeStats`, `computeFeeRecommendations`) with graceful legacy `kovanica_estimateFee` fallback.
+
 ---
 
 ## Tested SDK Revision & Immutable Resolution
 
-`kovanica-playground` consumes `kovanica-sdk` at the pinned, immutable git revision [`d4f7cb9aa15b0da84a1a7607894381cbdf29fd41`](https://github.com/BetterCallDzuks/kovanica-sdk/commit/d4f7cb9aa15b0da84a1a7607894381cbdf29fd41):
+`kovanica-playground` consumes `kovanica-sdk` at the pinned, immutable git revision [`7e267ab595515badcdc03c82c8eed40c2a1a2e2e`](https://github.com/BetterCallDzuks/kovanica-sdk/commit/7e267ab595515badcdc03c82c8eed40c2a1a2e2e):
 
-- **Manifest Metadata (`package.json`):** Recorded in `kovanicaSdk.testedRevision` (`d4f7cb9aa15b0da84a1a7607894381cbdf29fd41`) and linked via `"kovanica-sdk": "file:../kovanica-sdk"` in `package.json` and `package-lock.json`.
-- **Automated Verification (`scripts/prepare-sdk.mjs`):** Running `npm run prepare:sdk` (also invoked automatically during `npm run build`) verifies that `../kovanica-sdk` exists, is checked out at the exact pinned 40-character SHA `d4f7cb9aa15b0da84a1a7607894381cbdf29fd41` (never following a moving `main`), and has compiled `dist/index.js`. If `../kovanica-sdk` is on a different branch or dirty, it materializes the pinned revision into `node_modules/kovanica-sdk` from an isolated worktree without modifying the sibling checkout.
-- **CI Enforcement (`.github/workflows/ci.yml` & `tests/methods.test.ts`):** GitHub Actions explicitly checks out `BetterCallDzuks/kovanica-sdk` at `ref: d4f7cb9aa15b0da84a1a7607894381cbdf29fd41`, and unit tests assert that `package.json`, `.github/workflows/ci.yml`, and the resolved `node_modules/kovanica-sdk` match this SHA.
+- **Manifest Metadata (`package.json`):** Recorded in `kovanicaSdk.testedRevision` (`7e267ab595515badcdc03c82c8eed40c2a1a2e2e`) and linked via `"kovanica-sdk": "file:../kovanica-sdk"` in `package.json` and `package-lock.json`.
+- **Automated Verification (`scripts/prepare-sdk.mjs`):** Running `npm run prepare:sdk` (also invoked automatically during `npm run build`) verifies that `../kovanica-sdk` exists, is checked out at the exact pinned 40-character SHA `7e267ab595515badcdc03c82c8eed40c2a1a2e2e` (never following a moving `main`), and has compiled `dist/index.js`. If `../kovanica-sdk` is on a different branch or dirty, it materializes the pinned revision into `node_modules/kovanica-sdk` from an isolated worktree without modifying the sibling checkout.
+- **CI Enforcement (`.github/workflows/ci.yml` & `tests/methods.test.ts`):** GitHub Actions explicitly checks out `BetterCallDzuks/kovanica-sdk` at `ref: 7e267ab595515badcdc03c82c8eed40c2a1a2e2e`, and unit tests assert that `package.json`, `.github/workflows/ci.yml`, and the resolved `node_modules/kovanica-sdk` match this SHA.
 
 ---
 
 ## Local Integration & Build Workflow
 
 ```bash
-# 1. Verify/clone and build ../kovanica-sdk at pinned SHA d4f7cb9aa15b0da84a1a7607894381cbdf29fd41
+# 1. Verify/clone and build ../kovanica-sdk at pinned SHA 7e267ab595515badcdc03c82c8eed40c2a1a2e2e
 npm run prepare:sdk
 
 # 2. Install playground dependencies cleanly from lockfile
@@ -132,7 +141,7 @@ In CI or isolated environments, the SDK is checked out at the exact pinned revis
 ```bash
 git clone https://github.com/BetterCallDzuks/kovanica-sdk.git
 cd kovanica-sdk
-git checkout d4f7cb9aa15b0da84a1a7607894381cbdf29fd41
+git checkout 7e267ab595515badcdc03c82c8eed40c2a1a2e2e
 npm ci
 npm run build
 

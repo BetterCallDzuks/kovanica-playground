@@ -10,6 +10,7 @@ import {
   applyFeeBuffer,
   bip39Seed,
   CHAIN_IDS,
+  computeFeeRecommendations,
   computeTransferTransactionSigningHash,
   ContractFacade,
   createFailoverClient,
@@ -54,6 +55,7 @@ import {
   NameRegistryClient,
   NftClient,
   normalizeAddressList,
+  parseMempoolFeeStats,
   peekTransactionVariant,
   probeRpcNode,
   readContractStorage,
@@ -113,6 +115,9 @@ import {
   type FailoverHttpTransportOptions,
   type FeeBufferEstimate,
   type FeeBufferOptions,
+  type FeeRecommendationOptions,
+  type FeeRecommendations,
+  type FeeRecommendationTier,
   type FinalityClient,
   type FinalityProgress,
   type FinalityReceiptLike,
@@ -124,6 +129,7 @@ import {
   type HtlcCreateParams,
   type JsonRpcBatchItemResult,
   type JsonRpcBatchRequestItem,
+  type MempoolFeeStats,
   type MultisigCreateParams,
   type MultisigProposeParams,
   type MultisigTxParams,
@@ -838,6 +844,7 @@ export {
   AIRGAP_ENVELOPE_PREFIX,
   AIRGAP_ENVELOPE_VERSION,
   applyFeeBuffer,
+  computeFeeRecommendations,
   computeTransferTransactionSigningHash,
   ContractFacade,
   createFailoverClient,
@@ -867,6 +874,7 @@ export {
   NameRegistryClient,
   NftClient,
   normalizeAddressList,
+  parseMempoolFeeStats,
   peekTransactionVariant,
   probeRpcNode,
   readContractStorage,
@@ -924,6 +932,9 @@ export {
   type FailoverHttpTransportOptions,
   type FeeBufferEstimate,
   type FeeBufferOptions,
+  type FeeRecommendationOptions,
+  type FeeRecommendations,
+  type FeeRecommendationTier,
   type FinalityClient,
   type FinalityProgress,
   type FinalityReceiptLike,
@@ -935,6 +946,7 @@ export {
   type HtlcCreateParams,
   type JsonRpcBatchItemResult,
   type JsonRpcBatchRequestItem,
+  type MempoolFeeStats,
   type MultisigCreateParams,
   type MultisigProposeParams,
   type MultisigTxParams,
@@ -3026,6 +3038,75 @@ export async function runNodeCapabilityProbe(
     canonicalTagMatch: result.canonicalTagMatch,
     latencyMs: result.latencyMs,
     ...(result.error !== undefined ? { error: result.error } : {}),
+  };
+}
+
+// --- Mempool Fee-Tier Estimator (kovanica-sdk v0.5.0) ---
+
+export interface MempoolFeeTierProbeClient {
+  getMempoolStats(): Promise<MempoolFeeStats>;
+  estimateFee(): Promise<bigint>;
+}
+
+export interface MempoolFeeTierProbeResult {
+  source: "mempool" | "fallback";
+  pendingCount: number;
+  totalBytes: number;
+  economyAtoms: string;
+  standardAtoms: string;
+  priorityAtoms: string;
+}
+
+/**
+ * Probes `kovanica_mempoolStats` and computes monotonic `economy` / `standard` / `priority`
+ * fee-per-byte recommendations via `computeFeeRecommendations`.
+ * Gracefully falls back to `estimateFee()` when `getMempoolStats()` fails (e.g. legacy node)
+ * or when the mempool is empty.
+ */
+export async function runMempoolFeeTierProbe(
+  client: MempoolFeeTierProbeClient,
+  options?: Omit<FeeRecommendationOptions, "fallbackBaseFeePerByte">,
+): Promise<MempoolFeeTierProbeResult> {
+  let stats: MempoolFeeStats | null = null;
+  try {
+    stats = await client.getMempoolStats();
+  } catch {
+    stats = null;
+  }
+
+  if (stats && stats.pendingCount > 0 && stats.p50FeePerByte !== null) {
+    const recommendations = computeFeeRecommendations(stats, options);
+    return {
+      source: recommendations.source,
+      pendingCount: stats.pendingCount,
+      totalBytes: stats.totalBytes,
+      economyAtoms: recommendations.economy.toString(),
+      standardAtoms: recommendations.standard.toString(),
+      priorityAtoms: recommendations.priority.toString(),
+    };
+  }
+
+  const fallbackBaseFeePerByte = await client.estimateFee();
+  const emptyStats: MempoolFeeStats = {
+    pendingCount: stats?.pendingCount ?? 0,
+    totalBytes: stats?.totalBytes ?? 0,
+    minFeePerByte: null,
+    p50FeePerByte: null,
+    p90FeePerByte: null,
+    maxFeePerByte: null,
+  };
+  const recommendations = computeFeeRecommendations(emptyStats, {
+    ...options,
+    fallbackBaseFeePerByte,
+  });
+
+  return {
+    source: recommendations.source,
+    pendingCount: emptyStats.pendingCount,
+    totalBytes: emptyStats.totalBytes,
+    economyAtoms: recommendations.economy.toString(),
+    standardAtoms: recommendations.standard.toString(),
+    priorityAtoms: recommendations.priority.toString(),
   };
 }
 
