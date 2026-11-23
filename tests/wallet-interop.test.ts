@@ -16,7 +16,9 @@ import {
   buildVaultCreateCall,
   bytesToHex,
   concat,
+  decodeContractLog,
   decodeContractStateHex,
+  decodeTransactionReceiptLogs,
   deriveAccountsFromMnemonic,
   deriveContractStorageSlotHex,
   derivePrefixedStorageSlot,
@@ -24,6 +26,7 @@ import {
   encodeBincodeBytes32Vec,
   encodeBincodeString,
   encodeBincodeStringVec,
+  estimateBatchCalls,
   estimateContractCall,
   estimateContractCallBatch,
   fetchAndDecodeContractStorageSlot,
@@ -39,6 +42,7 @@ import {
   u32le,
   u64le,
   validateMnemonic,
+  waitForTransactionReceipt,
   type UnsignedTx,
 } from "../src/wallet-interop";
 
@@ -1053,6 +1057,115 @@ describe("Ecosystem HD Wallet & Wasmi Contract Interoperability (PRO-53, PRO-48)
         ).rejects.toThrow(KovanicaDecodeError);
 
         expect(rpcCalled).toBe(false);
+      });
+
+      it("decodes typed Bincode logs and receipts via re-exported SDK decodeContractLog, decodeTransactionReceiptLogs, estimateBatchCalls, and waitForTransactionReceipt", async () => {
+        const owner = hexToBytes("aa".repeat(32));
+        const pubkey = hexToBytes("bb".repeat(32));
+        const nameLogBytes = concat([
+          owner,
+          pubkey,
+          encodeBincodeStringVec(["https://relay1.kovanica.org", "https://relay2.kovanica.org"]),
+        ]);
+        const nameLogHex = `0x${bytesToHex(nameLogBytes)}`;
+
+        // 1. decodeContractLog direct discriminated union
+        const singleLog = decodeContractLog(nameLogHex, "name");
+        expect(singleLog.kind).toBe("name");
+        expect(singleLog.record.ownerHex).toBe("aa".repeat(32));
+        expect(singleLog.record.pubkeyHex).toBe("bb".repeat(32));
+        expect(singleLog.record.relayEndpoints).toEqual([
+          "https://relay1.kovanica.org",
+          "https://relay2.kovanica.org",
+        ]);
+
+        // 2. decodeTransactionReceiptLogs with both a fixed kind and a selective resolver callback
+        const multisigLogBytes = concat([
+          encodeBincodeBytes32Vec([owner, pubkey]),
+          u32le(2),
+          u64le(11n),
+        ]);
+        const receiptWithLogs = {
+          logs: [
+            {
+              address: "0x" + "11".repeat(32),
+              topics: ["0x" + "aa".repeat(32)],
+              data: nameLogHex,
+            },
+            {
+              address: "0x" + "22".repeat(32),
+              topics: ["0x" + "bb".repeat(32)],
+              data: "0xdeadbeef", // skipped by resolver
+            },
+            {
+              address: "0x" + "33".repeat(32),
+              topics: ["0x" + "cc".repeat(32)],
+              data: `0x${bytesToHex(multisigLogBytes)}`,
+            },
+          ],
+        };
+
+        const decodedFixed = decodeTransactionReceiptLogs(
+          { logs: [receiptWithLogs.logs[0]] },
+          "name",
+        );
+        expect(decodedFixed).toHaveLength(1);
+        expect(decodedFixed[0].index).toBe(0);
+        expect(decodedFixed[0].kind).toBe("name");
+        expect(decodedFixed[0].record.ownerHex).toBe("aa".repeat(32));
+
+        const decodedSelective = decodeTransactionReceiptLogs(receiptWithLogs, (_log, index) => {
+          if (index === 0) return "name";
+          if (index === 2) return "multisig_state";
+          return null;
+        });
+        expect(decodedSelective).toHaveLength(2);
+        expect(decodedSelective[0].index).toBe(0);
+        expect(decodedSelective[0].kind).toBe("name");
+        expect(decodedSelective[1].index).toBe(2);
+        expect(decodedSelective[1].kind).toBe("multisig_state");
+        if (decodedSelective[1].kind === "multisig_state") {
+          expect(decodedSelective[1].record.threshold).toBe(2);
+          expect(decodedSelective[1].record.nextTxId).toBe(11n);
+        }
+
+        // 3. Re-exported estimateBatchCalls and waitForTransactionReceipt
+        const contract = hexToBytes("44".repeat(32));
+        const sdkBatch = await estimateBatchCalls(
+          {
+            estimateFee: async () => 15n,
+            getNonce: async () => 5n,
+          },
+          [
+            {
+              contract,
+              method: "token_transfer",
+              args: concat([pubkey, u128le(100n)]),
+            },
+          ],
+          { sender: "0x" + "aa".repeat(32), chainId: CHAIN_IDS.TESTNET },
+        );
+        expect(sdkBatch.calls).toHaveLength(1);
+        expect(sdkBatch.startNonce).toBe(5n);
+        expect(sdkBatch.feeRatePerByte).toBe(15n);
+
+        const waitedReceipt = await waitForTransactionReceipt(
+          {
+            getTransactionReceipt: async (hash) => ({
+              transactionHash: hash,
+              blockHash: validBlockHash,
+              blockNumber: 42n,
+              transactionIndex: 0n,
+              status: 1,
+              success: true,
+              gasUsed: 21000n,
+            }),
+          },
+          `0x${validTxHash}`,
+          { pollIntervalMs: 10, timeoutMs: 500 },
+        );
+        expect(waitedReceipt.transactionHash).toBe(`0x${validTxHash}`);
+        expect(waitedReceipt.success).toBe(true);
       });
     });
   });
