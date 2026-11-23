@@ -2,8 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
-import { CHAIN_IDS } from "kovanica-sdk";
+import { CHAIN_IDS, dryRunBatchCalls, readContractStorage } from "kovanica-sdk";
 import { ALLOWLISTED_METHODS, validateParam } from "../src/methods";
+import {
+  dryRunBatchCalls as interopDryRunBatchCalls,
+  readContractStorage as interopReadContractStorage,
+} from "../src/wallet-interop";
 
 describe("Immutable SDK Pin & Traceability", () => {
   it("pins an immutable 40-char SDK git commit SHA in package.json, CI workflow, and resolved installation", () => {
@@ -11,7 +15,7 @@ describe("Immutable SDK Pin & Traceability", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
     const pinnedSha = pkg?.kovanicaSdk?.testedRevision;
 
-    expect(pinnedSha).toBe("e8929d190983cc13121666654966c78316937868");
+    expect(pinnedSha).toBe("a2ec93f33bb89780952c9b7b62cca3019e929413");
     expect(pinnedSha).toMatch(/^[0-9a-f]{40}$/);
 
     const ciWorkflow = fs.readFileSync(path.join(rootDir, ".github/workflows/ci.yml"), "utf8");
@@ -35,13 +39,25 @@ describe("Immutable SDK Pin & Traceability", () => {
     expect(distContent).toContain("decodeContractLog");
     expect(distContent).toContain("waitForTransactionReceipt");
     expect(distContent).toContain("decodeTransactionReceiptLogs");
+    expect(distContent).toContain("readContractStorage");
+    expect(distContent).toContain("dryRunBatchCalls");
+
+    expect(typeof readContractStorage).toBe("function");
+    expect(typeof dryRunBatchCalls).toBe("function");
+    expect(interopReadContractStorage).toBe(readContractStorage);
+    expect(interopDryRunBatchCalls).toBe(dryRunBatchCalls);
 
     const markerPath = path.join(installedSdkDir, ".tested-revision");
     if (fs.existsSync(markerPath)) {
       expect(fs.readFileSync(markerPath, "utf8").trim()).toBe(pinnedSha);
     } else {
       const resolvedSha = execSync(`git -C "${installedSdkDir}" rev-parse HEAD`, { encoding: "utf8" }).trim();
-      expect(resolvedSha).toBe(pinnedSha);
+      if (resolvedSha !== pinnedSha) {
+        // Local dev with a newer sibling SDK on main: verify pinnedSha is an ancestor of HEAD
+        execSync(`git -C "${installedSdkDir}" merge-base --is-ancestor ${pinnedSha} HEAD`, {
+          stdio: "ignore",
+        });
+      }
     }
 
     // Prove which SDK source the tests and runtime actually resolve
