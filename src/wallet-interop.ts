@@ -5,9 +5,11 @@ import { generateMnemonic as scureGenerateMnemonic, validateMnemonic as scureVal
 import { wordlist } from "@scure/bip39/wordlists/english.js";
 import {
   ADDRESS_PREFIX,
+  applyFeeBuffer,
   bip39Seed,
   CHAIN_IDS,
   ContractFacade,
+  createFailoverClient,
   decodeAddress,
   decodeContractLog,
   decodeEscrowRecord,
@@ -29,22 +31,27 @@ import {
   estimateAndBuildCall,
   estimateBatchCalls,
   estimateCallTxSize,
+  estimateTxFeeWithBuffer,
+  FailoverHttpTransport,
   formatBip44Path,
   getContractLogHistory,
   getPublicKey,
   HtlcClient,
   KOVANICA_COIN_TYPE,
+  KovanicaClient,
   KovanicaDecodeError,
   MAX_JSONRPC_BATCH_SIZE,
   MultisigClient,
   NameRegistryClient,
   NftClient,
   readContractStorage,
+  sanitizeRpcUrl,
   subscribeContractEvents,
   TESTNET_ADDRESS_PREFIX,
   TokenClient,
   toHexQuantity,
   VaultClient,
+  waitForTransactionFinality,
   waitForTransactionReceipt,
   type BatchDryRunItemResult,
   type BatchDryRunResult,
@@ -71,6 +78,16 @@ import {
   type EstimateAndBuildCallClient,
   type EstimateAndBuildCallOptions,
   type EstimateBatchCallsOptions,
+  type FailoverEndpointHealth,
+  type FailoverEvent,
+  type FailoverHttpTransportOptions,
+  type FeeBufferEstimate,
+  type FeeBufferOptions,
+  type FinalityClient,
+  type FinalityProgress,
+  type FinalityReceiptLike,
+  type FinalityResult,
+  type FinalityStatus,
   type GetContractLogHistoryOptions,
   type GetLogsClient,
   type GetLogsFilter,
@@ -90,6 +107,7 @@ import {
   type ReceiptLogEntry,
   type ReceiptWithLogs,
   type RequestOptions,
+  type RpcRetryConfig,
   type StorageSlotContract,
   type StorageSlotKey,
   type StorageSlotKind,
@@ -97,6 +115,7 @@ import {
   type SubscribeLogsWsClient,
   type TokenTransferParams,
   type VaultCreateParams,
+  type WaitForFinalityOptions,
   type WaitForTransactionReceiptClient,
   type WaitForTransactionReceiptOptions,
 } from "kovanica-sdk";
@@ -779,7 +798,9 @@ export function runGoldenVectorSelfTest(): { ok: boolean; steps: SelfTestStep[] 
 // --- SDK v0.4.0 Fee/Gas Estimation & Typed Bincode State Decoders ---
 
 export {
+  applyFeeBuffer,
   ContractFacade,
+  createFailoverClient,
   DEFAULT_LOG_HISTORY_CHUNK_SIZE,
   decodeContractLog,
   decodeTransactionReceiptLogs,
@@ -790,6 +811,8 @@ export {
   estimateAndBuildCall,
   estimateBatchCalls,
   estimateCallTxSize,
+  estimateTxFeeWithBuffer,
+  FailoverHttpTransport,
   getContractLogHistory,
   HtlcClient,
   KovanicaDecodeError,
@@ -798,9 +821,11 @@ export {
   NameRegistryClient,
   NftClient,
   readContractStorage,
+  sanitizeRpcUrl,
   subscribeContractEvents,
   TokenClient,
   VaultClient,
+  waitForTransactionFinality,
   waitForTransactionReceipt,
   type BatchDryRunItemResult,
   type BatchDryRunResult,
@@ -827,6 +852,16 @@ export {
   type EstimateAndBuildCallClient,
   type EstimateAndBuildCallOptions,
   type EstimateBatchCallsOptions,
+  type FailoverEndpointHealth,
+  type FailoverEvent,
+  type FailoverHttpTransportOptions,
+  type FeeBufferEstimate,
+  type FeeBufferOptions,
+  type FinalityClient,
+  type FinalityProgress,
+  type FinalityReceiptLike,
+  type FinalityResult,
+  type FinalityStatus,
   type GetContractLogHistoryOptions,
   type GetLogsClient,
   type GetLogsFilter,
@@ -846,6 +881,7 @@ export {
   type ReceiptLogEntry,
   type ReceiptWithLogs,
   type RequestOptions,
+  type RpcRetryConfig,
   type StorageSlotContract,
   type StorageSlotKey,
   type StorageSlotKind,
@@ -853,6 +889,7 @@ export {
   type SubscribeLogsWsClient,
   type TokenTransferParams,
   type VaultCreateParams,
+  type WaitForFinalityOptions,
   type WaitForTransactionReceiptClient,
   type WaitForTransactionReceiptOptions,
 };
@@ -2387,5 +2424,227 @@ export async function runTypedFacadeRead(
       );
   }
 }
+
+// --- Contract Log History Explorer & Failover RPC Probe ---
+
+export interface ContractLogHistoryQueryParams {
+  fromBlock: bigint | number | string;
+  toBlock: bigint | number | string;
+  address?: Uint8Array | string;
+  decoderKind?: ContractLogKind | "";
+  chunkSize?: number;
+  topics?: ReadonlyArray<string | ReadonlyArray<string> | null>;
+  signal?: AbortSignal;
+  requestOptions?: RequestOptions;
+}
+
+export interface ContractLogHistoryQueryResult {
+  fromBlock: string;
+  toBlock: string;
+  chunksQueried: number;
+  totalLogs: number;
+  decodedCount: number;
+  decoderKind: ContractLogKind | null;
+  logs: unknown[];
+  decodedLogs: unknown[];
+}
+
+export interface FailoverRpcProbeResult {
+  ok: boolean;
+  chainId?: number;
+  blockNumber?: string;
+  activeEndpoints: FailoverEndpointHealth[];
+  failoverEvents: FailoverEvent[];
+  error?: string;
+}
+
+function toJsonSafeValue(value: unknown): unknown {
+  if (typeof value === "bigint") {
+    return value.toString();
+  }
+  if (value instanceof Uint8Array) {
+    return `0x${bytesToHex(value)}`;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => toJsonSafeValue(item));
+  }
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (v !== undefined) {
+        out[k] = toJsonSafeValue(v);
+      }
+    }
+    return out;
+  }
+  return value;
+}
+
+function parseBlockHeightInput(
+  value: bigint | number | string,
+  field: string,
+): bigint {
+  if (typeof value === "bigint") {
+    if (value < 0n) {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        `${field} must be a non-negative integer`,
+        { field },
+      );
+    }
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        `${field} must be a non-negative safe integer`,
+        { field },
+      );
+    }
+    return BigInt(value);
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!/^(0x[0-9a-fA-F]+|[0-9]+)$/.test(trimmed)) {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        `${field} must be a non-negative decimal or 0x-hex integer`,
+        { field },
+      );
+    }
+    return BigInt(trimmed);
+  }
+  throw new KovanicaDecodeError(
+    "INVALID_INPUT",
+    `${field} must be a bigint, integer, or numeric string`,
+    { field },
+  );
+}
+
+/**
+ * Wraps `getContractLogHistory` with fail-closed input normalization and
+ * JSON-serializable output (safely converting `bigint` to string and `Uint8Array` to `0x` hex).
+ */
+export async function runContractLogHistoryQuery(
+  client: GetLogsClient,
+  params: ContractLogHistoryQueryParams,
+): Promise<ContractLogHistoryQueryResult> {
+  const fromBlock = parseBlockHeightInput(params.fromBlock, "fromBlock");
+  const toBlock = parseBlockHeightInput(params.toBlock, "toBlock");
+
+  const trimmedAddress =
+    typeof params.address === "string" ? params.address.trim() : params.address;
+  const contract =
+    trimmedAddress &&
+    (typeof trimmedAddress !== "string" || trimmedAddress.length > 0)
+      ? trimmedAddress
+      : undefined;
+
+  const decoderKind =
+    params.decoderKind && params.decoderKind.trim().length > 0
+      ? (params.decoderKind.trim() as ContractLogKind)
+      : undefined;
+
+  const history = await getContractLogHistory(client, {
+    fromBlock,
+    toBlock,
+    ...(contract !== undefined ? { contract } : {}),
+    ...(decoderKind !== undefined ? { kind: decoderKind } : {}),
+    ...(params.chunkSize !== undefined ? { chunkSize: params.chunkSize } : {}),
+    ...(params.topics !== undefined ? { topics: params.topics } : {}),
+    ...(params.signal !== undefined ? { signal: params.signal } : {}),
+    ...(params.requestOptions !== undefined
+      ? { requestOptions: params.requestOptions }
+      : {}),
+  });
+
+  const logs = history.logs.map((entry) => toJsonSafeValue(entry));
+  const decodedLogs = history.decodedLogs.map((entry) => toJsonSafeValue(entry));
+
+  return {
+    fromBlock: history.fromBlock.toString(),
+    toBlock: history.toBlock.toString(),
+    chunksQueried: history.chunksQueried,
+    totalLogs: logs.length,
+    decodedCount: decodedLogs.length,
+    decoderKind: decoderKind ?? null,
+    logs,
+    decodedLogs,
+  };
+}
+
+function parseRpcEndpointList(urls: string | readonly string[]): string[] {
+  const rawList =
+    typeof urls === "string" ? urls.split(/[\n,]+/) : Array.from(urls);
+  return rawList.map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+}
+
+/**
+ * Probes a comma/newline-separated list (or array) of Kovanica JSON-RPC endpoints
+ * using `FailoverHttpTransport` + `KovanicaClient`, returning chain ID, block height,
+ * endpoint health snapshots, and any failover events triggered during the probe.
+ */
+export async function probeFailoverRpcEndpoints(
+  urls: string | readonly string[],
+  fetchImpl?: typeof fetch,
+): Promise<FailoverRpcProbeResult> {
+  const parsedUrls = parseRpcEndpointList(urls);
+  if (parsedUrls.length === 0) {
+    return {
+      ok: false,
+      activeEndpoints: [],
+      failoverEvents: [],
+      error: "Provide at least one HTTP(S) RPC endpoint URL.",
+    };
+  }
+
+  const failoverEvents: FailoverEvent[] = [];
+  let transport: FailoverHttpTransport;
+  try {
+    transport = new FailoverHttpTransport({
+      urls: parsedUrls,
+      timeoutMs: 5_000,
+      maxRetriesPerEndpoint: 0,
+      baseBackoffMs: 0,
+      ...(fetchImpl ? { fetch: fetchImpl } : {}),
+      onFailover: (event) => {
+        failoverEvents.push(event);
+      },
+    });
+  } catch (err: unknown) {
+    return {
+      ok: false,
+      activeEndpoints: [],
+      failoverEvents,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  const client = new KovanicaClient({ transport });
+  try {
+    const rawChainId = await client.call<string | number>("kovanica_chainId");
+    const chainId =
+      typeof rawChainId === "number"
+        ? rawChainId
+        : Number(BigInt(String(rawChainId).trim()));
+    const blockNumber = await client.blockNumber();
+    return {
+      ok: true,
+      chainId,
+      blockNumber: blockNumber.toString(),
+      activeEndpoints: transport.getEndpointHealth(),
+      failoverEvents,
+    };
+  } catch (err: unknown) {
+    return {
+      ok: false,
+      activeEndpoints: transport.getEndpointHealth(),
+      failoverEvents,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 
 

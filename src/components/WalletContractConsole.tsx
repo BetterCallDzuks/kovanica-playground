@@ -16,6 +16,7 @@ import {
   bytesToHex,
   decodeContractStateHex,
   DEFAULT_JSONRPC_READ_BATCH_PRESET,
+  DEFAULT_LOG_HISTORY_CHUNK_SIZE,
   deriveAccountsFromMnemonic,
   deriveContractStorageSlotHex,
   estimateContractCall,
@@ -29,13 +30,18 @@ import {
   MAX_JSONRPC_BATCH_SIZE,
   parseImportedContractPresetsJson,
   pollAndDecodeTransactionReceipt,
+  probeFailoverRpcEndpoints,
+  runContractLogHistoryQuery,
   runGoldenVectorSelfTest,
   runTypedFacadeRead,
   signAndSerializeTransaction,
   validateMnemonic,
   type CallTxKind,
   type ContractDecoderKind,
+  type ContractLogHistoryQueryResult,
+  type ContractLogKind,
   type DerivedAccountInfo,
+  type FailoverRpcProbeResult,
   type JsonRpcBatchRequestItem,
   type JsonRpcReadBatchSummary,
   type PollAndDecodeTransactionReceiptResult,
@@ -180,6 +186,26 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
   const [isReadingFacade, setIsReadingFacade] = useState<boolean>(false);
   const [facadeReadResult, setFacadeReadResult] = useState<TypedFacadeReadResult | null>(null);
   const [facadeReadError, setFacadeReadError] = useState<string | null>(null);
+
+  // Contract Log History Explorer & Failover RPC Probe state
+  const [logFromBlockStr, setLogFromBlockStr] = useState<string>("0");
+  const [logToBlockStr, setLogToBlockStr] = useState<string>("1000");
+  const [logAddressInput, setLogAddressInput] = useState<string>("");
+  const [logChunkSizeStr, setLogChunkSizeStr] = useState<string>(
+    String(DEFAULT_LOG_HISTORY_CHUNK_SIZE),
+  );
+  const [logDecoderKind, setLogDecoderKind] = useState<ContractLogKind | "">("");
+  const [isQueryingLogs, setIsQueryingLogs] = useState<boolean>(false);
+  const [logHistoryResult, setLogHistoryResult] =
+    useState<ContractLogHistoryQueryResult | null>(null);
+  const [logHistoryError, setLogHistoryError] = useState<string | null>(null);
+
+  const [failoverUrlsInput, setFailoverUrlsInput] = useState<string>(
+    () => rpcUrl?.trim() || "http://127.0.0.1:8545/rpc",
+  );
+  const [isProbingFailover, setIsProbingFailover] = useState<boolean>(false);
+  const [failoverProbeResult, setFailoverProbeResult] =
+    useState<FailoverRpcProbeResult | null>(null);
 
   // Self-test results
   const [selfTestSteps, setSelfTestSteps] = useState<SelfTestStep[] | null>(null);
@@ -2289,6 +2315,308 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
             </pre>
           </div>
         )}
+      </div>
+
+      {/* Contract Log History & Failover RPC Panel */}
+      <div
+        className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-5"
+        data-testid="log-history-panel"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
+          <div>
+            <h2 className="text-sm font-semibold text-fg">
+              Contract Log History &amp; Failover RPC
+            </h2>
+            <p className="text-xs text-muted">
+              Query chunked <code className="font-mono text-fg">kovanica_getLogs</code> history with optional Bincode decoding and probe multi-endpoint RPC failover
+            </p>
+          </div>
+          <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-surface-2 border border-border text-gold">
+            Chunked Logs + Failover
+          </span>
+        </div>
+
+        {/* Chunked Contract Log History Explorer */}
+        <div className="flex flex-col gap-3">
+          <h3 className="text-xs font-semibold text-muted uppercase tracking-wider">
+            Contract Log History Explorer
+          </h3>
+          <div className="grid grid-cols-1 md:grid-cols-5 gap-3 items-end">
+            <div>
+              <label
+                htmlFor="log-from-block-input"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                From Block
+              </label>
+              <input
+                id="log-from-block-input"
+                data-testid="log-from-block-input"
+                type="text"
+                value={logFromBlockStr}
+                onChange={(e) => setLogFromBlockStr(e.target.value)}
+                placeholder="0"
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="log-to-block-input"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                To Block
+              </label>
+              <input
+                id="log-to-block-input"
+                data-testid="log-to-block-input"
+                type="text"
+                value={logToBlockStr}
+                onChange={(e) => setLogToBlockStr(e.target.value)}
+                placeholder="1000"
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="log-chunk-size-input"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                Chunk Size
+              </label>
+              <input
+                id="log-chunk-size-input"
+                data-testid="log-chunk-size-input"
+                type="number"
+                min={1}
+                value={logChunkSizeStr}
+                onChange={(e) => setLogChunkSizeStr(e.target.value)}
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="log-address-input"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                Contract Address (optional)
+              </label>
+              <input
+                id="log-address-input"
+                data-testid="log-address-input"
+                type="text"
+                value={logAddressInput}
+                onChange={(e) => setLogAddressInput(e.target.value)}
+                placeholder="0x... or kvnc..."
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="log-decoder-select"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                Bincode Decoder (optional)
+              </label>
+              <select
+                id="log-decoder-select"
+                data-testid="log-decoder-select"
+                value={logDecoderKind}
+                onChange={(e) => setLogDecoderKind(e.target.value as ContractLogKind | "")}
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              >
+                <option value="">Raw logs only</option>
+                <option value="name">name</option>
+                <option value="htlc">htlc</option>
+                <option value="escrow">escrow</option>
+                <option value="vault">vault</option>
+                <option value="token_metadata">token_metadata</option>
+                <option value="token_pool">token_pool</option>
+                <option value="nft_metadata">nft_metadata</option>
+                <option value="multisig_state">multisig_state</option>
+                <option value="multisig_tx">multisig_tx</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              data-testid="run-log-history-btn"
+              disabled={isQueryingLogs}
+              onClick={async () => {
+                setLogHistoryError(null);
+                setLogHistoryResult(null);
+                setIsQueryingLogs(true);
+                try {
+                  const parsedChunk = Number.parseInt(logChunkSizeStr.trim(), 10);
+                  const res = await runContractLogHistoryQuery(client, {
+                    fromBlock: logFromBlockStr,
+                    toBlock: logToBlockStr,
+                    address: logAddressInput.trim() || undefined,
+                    decoderKind: logDecoderKind || undefined,
+                    chunkSize: Number.isFinite(parsedChunk) ? parsedChunk : undefined,
+                  });
+                  setLogHistoryResult(res);
+                } catch (err: unknown) {
+                  if (err instanceof KovanicaDecodeError) {
+                    setLogHistoryError(`[${err.code}] ${err.message}`);
+                  } else {
+                    setLogHistoryError(err instanceof Error ? err.message : String(err));
+                  }
+                } finally {
+                  setIsQueryingLogs(false);
+                }
+              }}
+              className="px-4 py-2 bg-gold hover:bg-gold/90 text-bg rounded-lg text-xs font-semibold transition-colors disabled:opacity-50"
+            >
+              {isQueryingLogs ? "Querying Logs..." : "Query Log History"}
+            </button>
+          </div>
+
+          {logHistoryError && (
+            <div
+              data-testid="log-history-error"
+              className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3"
+            >
+              {logHistoryError}
+            </div>
+          )}
+
+          {logHistoryResult && (
+            <div data-testid="log-history-result" className="flex flex-col gap-2 text-xs">
+              <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1 text-muted">
+                <span>
+                  Range: <strong className="text-fg">{logHistoryResult.fromBlock}..{logHistoryResult.toBlock}</strong>
+                </span>
+                <span>
+                  Chunks: <strong className="text-gold">{logHistoryResult.chunksQueried}</strong>
+                </span>
+                <span>
+                  Logs: <strong className="text-fg">{logHistoryResult.totalLogs}</strong>
+                </span>
+                <span>
+                  Decoded: <strong className="text-emerald-400">{logHistoryResult.decodedCount}</strong>
+                </span>
+              </div>
+              <pre
+                data-testid="log-history-json"
+                className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto max-h-72"
+              >
+                {JSON.stringify(logHistoryResult, null, 2)}
+              </pre>
+            </div>
+          )}
+        </div>
+
+        {/* Multi-Endpoint Failover RPC Probe */}
+        <div className="flex flex-col gap-3 border-t border-border pt-4">
+          <h3 className="text-xs font-semibold text-muted uppercase tracking-wider">
+            Failover RPC Endpoint Probe
+          </h3>
+          <div>
+            <label
+              htmlFor="failover-urls-input"
+              className="block text-xs font-medium text-muted mb-1"
+            >
+              RPC Endpoints (comma or newline separated, primary first)
+            </label>
+            <textarea
+              id="failover-urls-input"
+              data-testid="failover-urls-input"
+              rows={3}
+              value={failoverUrlsInput}
+              onChange={(e) => setFailoverUrlsInput(e.target.value)}
+              placeholder={"https://primary-rpc.example/rpc\nhttps://secondary-rpc.example/rpc"}
+              className="w-full bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+            />
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              data-testid="run-failover-probe-btn"
+              disabled={isProbingFailover}
+              onClick={async () => {
+                setIsProbingFailover(true);
+                setFailoverProbeResult(null);
+                try {
+                  const res = await probeFailoverRpcEndpoints(failoverUrlsInput);
+                  setFailoverProbeResult(res);
+                } finally {
+                  setIsProbingFailover(false);
+                }
+              }}
+              className="px-4 py-2 bg-gold/20 hover:bg-gold/30 rounded-lg border border-gold/40 text-gold text-xs font-semibold transition-colors disabled:opacity-50"
+            >
+              {isProbingFailover ? "Probing Endpoints..." : "Probe Failover Endpoints"}
+            </button>
+          </div>
+
+          {failoverProbeResult && (
+            <div data-testid="failover-probe-result" className="flex flex-col gap-2 text-xs">
+              <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1 text-muted">
+                <span>
+                  Status:{" "}
+                  <strong
+                    className={
+                      failoverProbeResult.ok ? "text-emerald-400" : "text-red-400"
+                    }
+                  >
+                    {failoverProbeResult.ok ? "OK" : "FAILED"}
+                  </strong>
+                </span>
+                {failoverProbeResult.chainId !== undefined && (
+                  <span>
+                    Chain ID: <strong className="text-fg">{failoverProbeResult.chainId}</strong>
+                  </span>
+                )}
+                {failoverProbeResult.blockNumber !== undefined && (
+                  <span>
+                    Block: <strong className="text-gold">{failoverProbeResult.blockNumber}</strong>
+                  </span>
+                )}
+                <span>
+                  Failovers: <strong className="text-fg">{failoverProbeResult.failoverEvents.length}</strong>
+                </span>
+              </div>
+
+              {failoverProbeResult.error && (
+                <div className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3">
+                  {failoverProbeResult.error}
+                </div>
+              )}
+
+              {failoverProbeResult.activeEndpoints.length > 0 && (
+                <div className="flex flex-col gap-1.5">
+                  {failoverProbeResult.activeEndpoints.map((ep, idx) => (
+                    <div
+                      key={`${ep.url}-${idx}`}
+                      className="bg-surface-2 border border-border rounded-lg px-3 py-2 font-mono flex flex-wrap items-center justify-between gap-2"
+                    >
+                      <span className="text-fg break-all">{ep.url}</span>
+                      <div className="flex items-center gap-3 text-[11px]">
+                        <span
+                          className={
+                            ep.healthy ? "text-emerald-400" : "text-red-400"
+                          }
+                        >
+                          {ep.state} ({ep.healthy ? "healthy" : "cooldown"})
+                        </span>
+                        <span className="text-muted">
+                          ok:{ep.totalSuccesses} err:{ep.totalFailures}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Self-Test & Invariant Verification Suite */}

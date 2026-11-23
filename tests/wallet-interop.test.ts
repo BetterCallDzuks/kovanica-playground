@@ -50,7 +50,9 @@ import {
   NftClient,
   parseImportedContractPresetsJson,
   pollAndDecodeTransactionReceipt,
+  probeFailoverRpcEndpoints,
   readContractStorage,
+  runContractLogHistoryQuery,
   runGoldenVectorSelfTest,
   runTypedFacadeRead,
   signAndSerializeTransaction,
@@ -1835,6 +1837,142 @@ describe("Ecosystem HD Wallet & Wasmi Contract Interoperability (PRO-53, PRO-48)
         expect(received).toEqual([{ kind: "name", ownerHex: "aa".repeat(32) }]);
         expect(await handle.unsubscribe()).toBe(true);
         expect(unsubscribedId).toBe("0xsub-ev-1");
+      });
+    });
+
+    describe("Contract Log History Explorer & Failover RPC Probe", () => {
+      it("runs chunked runContractLogHistoryQuery with optional Bincode decode and JSON-safe output", async () => {
+        const pkA = hexToBytes("aa".repeat(32));
+        const pkB = hexToBytes("bb".repeat(32));
+        const nameBytes = concat([
+          pkA,
+          pkB,
+          encodeBincodeStringVec(["https://relay1.kovanica.org"]),
+        ]);
+        const nameHex = `0x${bytesToHex(nameBytes)}`;
+        const requestedRanges: Array<{ fromBlock: string; toBlock: string }> = [];
+
+        const mockClient = {
+          getLogs: async (filter: { fromBlock: string; toBlock: string }) => {
+            requestedRanges.push({
+              fromBlock: filter.fromBlock,
+              toBlock: filter.toBlock,
+            });
+            if (filter.fromBlock === "0x0") {
+              return [
+                {
+                  address: "0x" + "33".repeat(32),
+                  topics: ["0x01"],
+                  data: nameHex,
+                  blockNumber: 5n,
+                  logIndex: 0n,
+                },
+              ];
+            }
+            if (filter.fromBlock === "0x14") {
+              return [
+                {
+                  address: "0x" + "33".repeat(32),
+                  topics: ["0x01"],
+                  data: nameHex,
+                  blockNumber: 22n,
+                  logIndex: 1n,
+                },
+              ];
+            }
+            return [];
+          },
+        };
+
+        const result = await runContractLogHistoryQuery(mockClient, {
+          fromBlock: "0",
+          toBlock: "25",
+          address: "0x" + "33".repeat(32),
+          decoderKind: "name",
+          chunkSize: 10,
+        });
+
+        expect(result.chunksQueried).toBe(3);
+        expect(requestedRanges).toEqual([
+          { fromBlock: "0x0", toBlock: "0x9" },
+          { fromBlock: "0xa", toBlock: "0x13" },
+          { fromBlock: "0x14", toBlock: "0x19" },
+        ]);
+        expect(result.fromBlock).toBe("0");
+        expect(result.toBlock).toBe("25");
+        expect(result.totalLogs).toBe(2);
+        expect(result.decodedCount).toBe(2);
+        expect(result.decoderKind).toBe("name");
+        expect((result.logs[0] as { blockNumber: string }).blockNumber).toBe("5");
+        expect((result.decodedLogs[0] as { record: { ownerHex: string } }).record.ownerHex).toBe(
+          "aa".repeat(32),
+        );
+
+        // Must be cleanly JSON-serializable without custom bigint replacer
+        const serialized = JSON.stringify(result);
+        expect(serialized).toContain("https://relay1.kovanica.org");
+
+        // Raw mode (no decoderKind) leaves decodedLogs empty
+        const rawResult = await runContractLogHistoryQuery(mockClient, {
+          fromBlock: 0,
+          toBlock: 9,
+          chunkSize: 10,
+        });
+        expect(rawResult.chunksQueried).toBe(1);
+        expect(rawResult.totalLogs).toBe(1);
+        expect(rawResult.decodedCount).toBe(0);
+        expect(rawResult.decoderKind).toBeNull();
+      });
+
+      it("probes failover RPC endpoints and automatically fails over from primary 503 to secondary", async () => {
+        const calledUrls: string[] = [];
+        const mockFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          calledUrls.push(url);
+          if (url.startsWith("https://primary.kovanica.test")) {
+            return new Response("Service Unavailable", {
+              status: 503,
+              statusText: "Service Unavailable",
+            });
+          }
+          const body = JSON.parse(String(init?.body ?? "{}")) as {
+            id: number | string;
+            method: string;
+          };
+          const result = body.method === "kovanica_chainId" ? "0x2" : "0x2a";
+          return new Response(
+            JSON.stringify({ jsonrpc: "2.0", id: body.id, result }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        }) as typeof fetch;
+
+        const probe = await probeFailoverRpcEndpoints(
+          "https://primary.kovanica.test/rpc\nhttps://secondary.kovanica.test/rpc",
+          mockFetch,
+        );
+
+        expect(probe.ok).toBe(true);
+        expect(probe.chainId).toBe(2);
+        expect(probe.blockNumber).toBe("42");
+        expect(probe.failoverEvents.length).toBeGreaterThanOrEqual(1);
+        expect(probe.failoverEvents[0].fromUrl).toBe("https://primary.kovanica.test/rpc");
+        expect(probe.failoverEvents[0].toUrl).toBe("https://secondary.kovanica.test/rpc");
+        expect(probe.failoverEvents[0].status).toBe(503);
+        expect(probe.activeEndpoints).toHaveLength(2);
+        expect(probe.activeEndpoints[0].healthy).toBe(false);
+        expect(probe.activeEndpoints[0].state).toBe("open");
+        expect(probe.activeEndpoints[1].healthy).toBe(true);
+        expect(probe.activeEndpoints[1].totalSuccesses).toBe(2);
+        expect(calledUrls[0]).toBe("https://primary.kovanica.test/rpc");
+        expect(calledUrls[1]).toBe("https://secondary.kovanica.test/rpc");
+
+        // Empty list fails cleanly without throwing
+        const emptyProbe = await probeFailoverRpcEndpoints("  , \n ");
+        expect(emptyProbe.ok).toBe(false);
+        expect(emptyProbe.activeEndpoints).toEqual([]);
       });
     });
   });

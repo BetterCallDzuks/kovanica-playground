@@ -3,9 +3,13 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import {
+  applyFeeBuffer,
   CHAIN_IDS,
+  createFailoverClient,
   dryRunBatchCalls,
   EscrowClient,
+  estimateTxFeeWithBuffer,
+  FailoverHttpTransport,
   getContractLogHistory,
   HtlcClient,
   MAX_JSONRPC_BATCH_SIZE,
@@ -13,14 +17,20 @@ import {
   NameRegistryClient,
   NftClient,
   readContractStorage,
+  sanitizeRpcUrl,
   subscribeContractEvents,
   TokenClient,
   VaultClient,
+  waitForTransactionFinality,
 } from "kovanica-sdk";
 import { ALLOWLISTED_METHODS, validateParam } from "../src/methods";
 import {
+  applyFeeBuffer as interopApplyFeeBuffer,
+  createFailoverClient as interopCreateFailoverClient,
   dryRunBatchCalls as interopDryRunBatchCalls,
   EscrowClient as interopEscrowClient,
+  estimateTxFeeWithBuffer as interopEstimateTxFeeWithBuffer,
+  FailoverHttpTransport as interopFailoverHttpTransport,
   getContractLogHistory as interopGetContractLogHistory,
   HtlcClient as interopHtlcClient,
   MAX_JSONRPC_BATCH_SIZE as interopMaxJsonRpcBatchSize,
@@ -28,9 +38,11 @@ import {
   NameRegistryClient as interopNameRegistryClient,
   NftClient as interopNftClient,
   readContractStorage as interopReadContractStorage,
+  sanitizeRpcUrl as interopSanitizeRpcUrl,
   subscribeContractEvents as interopSubscribeContractEvents,
   TokenClient as interopTokenClient,
   VaultClient as interopVaultClient,
+  waitForTransactionFinality as interopWaitForTransactionFinality,
 } from "../src/wallet-interop";
 
 describe("Immutable SDK Pin & Traceability", () => {
@@ -39,7 +51,7 @@ describe("Immutable SDK Pin & Traceability", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
     const pinnedSha = pkg?.kovanicaSdk?.testedRevision;
 
-    expect(pinnedSha).toBe("edd5cb5397f05e5bcf47043beb47df22d363f7ca");
+    expect(pinnedSha).toBe("f1aa74ad1e1076316692e801aec86d9c4e8b7c27");
     expect(pinnedSha).toMatch(/^[0-9a-f]{40}$/);
 
     const ciWorkflow = fs.readFileSync(path.join(rootDir, ".github/workflows/ci.yml"), "utf8");
@@ -76,15 +88,33 @@ describe("Immutable SDK Pin & Traceability", () => {
     expect(distContent).toContain("MultisigClient");
     expect(distContent).toContain("getContractLogHistory");
     expect(distContent).toContain("subscribeContractEvents");
+    expect(distContent).toContain("FailoverHttpTransport");
+    expect(distContent).toContain("createFailoverClient");
+    expect(distContent).toContain("sanitizeRpcUrl");
+    expect(distContent).toContain("applyFeeBuffer");
+    expect(distContent).toContain("estimateTxFeeWithBuffer");
+    expect(distContent).toContain("waitForTransactionFinality");
 
     expect(typeof readContractStorage).toBe("function");
     expect(typeof dryRunBatchCalls).toBe("function");
     expect(typeof getContractLogHistory).toBe("function");
     expect(typeof subscribeContractEvents).toBe("function");
+    expect(typeof FailoverHttpTransport).toBe("function");
+    expect(typeof createFailoverClient).toBe("function");
+    expect(typeof sanitizeRpcUrl).toBe("function");
+    expect(typeof applyFeeBuffer).toBe("function");
+    expect(typeof estimateTxFeeWithBuffer).toBe("function");
+    expect(typeof waitForTransactionFinality).toBe("function");
     expect(interopReadContractStorage).toBe(readContractStorage);
     expect(interopDryRunBatchCalls).toBe(dryRunBatchCalls);
     expect(interopGetContractLogHistory).toBe(getContractLogHistory);
     expect(interopSubscribeContractEvents).toBe(subscribeContractEvents);
+    expect(interopFailoverHttpTransport).toBe(FailoverHttpTransport);
+    expect(interopCreateFailoverClient).toBe(createFailoverClient);
+    expect(interopSanitizeRpcUrl).toBe(sanitizeRpcUrl);
+    expect(interopApplyFeeBuffer).toBe(applyFeeBuffer);
+    expect(interopEstimateTxFeeWithBuffer).toBe(estimateTxFeeWithBuffer);
+    expect(interopWaitForTransactionFinality).toBe(waitForTransactionFinality);
 
     // Assert all 7 typed contract facades + MAX_JSONRPC_BATCH_SIZE are exported and re-exported identically
     expect(MAX_JSONRPC_BATCH_SIZE).toBe(32);
