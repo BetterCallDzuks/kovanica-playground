@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { CHAIN_IDS, KOVANICA_COIN_TYPE } from "kovanica-sdk";
 import * as ed from "@noble/ed25519";
 import {
+  AIRGAP_ENVELOPE_PREFIX,
+  AIRGAP_ENVELOPE_VERSION,
   buildEscrowCreateCall,
   buildEscrowCreateCallTx,
   buildHtlcCreateCall,
@@ -17,9 +19,11 @@ import {
   bytesToHex,
   computeTransferTransactionSigningHash,
   concat,
+  decodeAirgapTxEnvelope,
   decodeContractLog,
   decodeContractStateHex,
   decodeSignedCallTransaction,
+  decodeSignedTransactionAuto,
   decodeSignedTransferTransaction,
   decodeTransactionReceiptLogs,
   DEFAULT_JSONRPC_READ_BATCH_PRESET,
@@ -28,6 +32,7 @@ import {
   derivePrefixedStorageSlot,
   deriveStorageSlotHex,
   dryRunBatchCalls,
+  encodeAirgapTxEnvelope,
   encodeBincodeBytes32Vec,
   encodeBincodeString,
   encodeBincodeStringVec,
@@ -44,6 +49,7 @@ import {
   hexToBytes,
   HtlcClient,
   inspectAddress,
+  inspectAnySignedTx,
   inspectRawSignedCallTx,
   inspectRawSignedTransferTx,
   isStorageSlotEmpty,
@@ -56,6 +62,7 @@ import {
   NftClient,
   normalizeAddressList,
   parseImportedContractPresetsJson,
+  peekTransactionVariant,
   pollAndDecodeTransactionReceipt,
   probeFailoverRpcEndpoints,
   probeRpcNode,
@@ -75,6 +82,7 @@ import {
   VaultClient,
   verifyCallTransactionSignature,
   verifyEd25519,
+  verifySignedTransactionAuto,
   verifyTransferTransactionSignature,
   waitForTransactionReceipt,
   type ContractFacadeClient,
@@ -2370,6 +2378,220 @@ describe("Ecosystem HD Wallet & Wasmi Contract Interoperability (PRO-53, PRO-48)
             publicKeyHex: "0x1234",
           }),
         ).toThrow(KovanicaDecodeError);
+      });
+    });
+
+    describe("Universal Tx Auto-Decoder & Air-Gap Envelope Studio", () => {
+      it("auto-decodes and verifies both signed Transfer and signed Call transactions via inspectAnySignedTx", () => {
+        const accounts = deriveAccountsFromMnemonic(goldenMnemonic, "", 2, CHAIN_IDS.TESTNET);
+        const sender = accounts[0];
+        const recipient = accounts[1];
+
+        // 1. Signed Transfer (variant 0)
+        const signedTransfer = signTransferTransaction({
+          privateKey: sender.secretKey,
+          to: recipient.testnetAddress,
+          amount: 1_250_000_000n,
+          nonce: 9n,
+          fee: 10_000n,
+          chainId: CHAIN_IDS.TESTNET,
+        });
+
+        expect(peekTransactionVariant(signedTransfer.rawTxHex)).toBe(0);
+        const rawAutoTransfer = decodeSignedTransactionAuto(signedTransfer.rawTxHex, {
+          chainId: CHAIN_IDS.TESTNET,
+        });
+        expect(rawAutoTransfer.kind).toBe("transfer");
+        expect(verifySignedTransactionAuto(rawAutoTransfer)).toBe(true);
+
+        const inspectedTransfer = inspectAnySignedTx(`0x${signedTransfer.rawTxHex}`, {
+          chainId: CHAIN_IDS.TESTNET,
+        });
+        expect(inspectedTransfer.kind).toBe("transfer");
+        expect(inspectedTransfer.variant).toBe(0);
+        expect(inspectedTransfer.signatureValid).toBe(true);
+        if (inspectedTransfer.kind === "transfer") {
+          expect(inspectedTransfer.amount).toBe("1250000000");
+          expect(inspectedTransfer.nonce).toBe("9");
+          expect(inspectedTransfer.fee).toBe("10000");
+          expect(inspectedTransfer.recipientHex).toBe(`0x${recipient.publicKeyHex}`);
+        }
+        expect(JSON.stringify(inspectedTransfer)).toContain('"kind":"transfer"');
+
+        // 2. Signed Wasmi Call (variant 6)
+        const contract = hexToBytes("33".repeat(32));
+        const callKind = buildNameRegisterCallTx(
+          contract,
+          "alice",
+          recipient.publicKey,
+          ["https://relay1.kovanica.org"],
+        );
+        const signedCall = signAndSerializeTransaction(
+          {
+            sender: sender.publicKey,
+            nonce: 10n,
+            kind: callKind,
+            fee: 25_000n,
+          },
+          sender.secretKey,
+          CHAIN_IDS.TESTNET,
+        );
+
+        expect(peekTransactionVariant(signedCall.rawTxHex)).toBe(6);
+        const rawAutoCall = decodeSignedTransactionAuto(signedCall.rawTxHex, {
+          chainId: CHAIN_IDS.TESTNET,
+        });
+        expect(rawAutoCall.kind).toBe("call");
+        expect(verifySignedTransactionAuto(rawAutoCall)).toBe(true);
+
+        const inspectedCall = inspectAnySignedTx(signedCall.rawTxHex, {
+          chainId: BigInt(CHAIN_IDS.TESTNET),
+        });
+        expect(inspectedCall.kind).toBe("call");
+        expect(inspectedCall.variant).toBe(6);
+        expect(inspectedCall.signatureValid).toBe(true);
+        if (inspectedCall.kind === "call") {
+          expect(inspectedCall.method).toBe("name_register");
+          expect(inspectedCall.nonce).toBe("10");
+          expect(inspectedCall.fee).toBe("25000");
+          expect(inspectedCall.gasLimit).toBe("100000");
+          expect(inspectedCall.contractHex).toBe(`0x${"33".repeat(32)}`);
+        }
+        expect(JSON.stringify(inspectedCall)).toContain('"kind":"call"');
+
+        // Wrong chainId or wrong publicKeyHex override fails signature verification
+        expect(
+          inspectAnySignedTx(signedTransfer.rawTxHex, {
+            chainId: CHAIN_IDS.MAINNET,
+          }).signatureValid,
+        ).toBe(false);
+        expect(
+          inspectAnySignedTx(signedCall.rawTxHex, {
+            chainId: CHAIN_IDS.TESTNET,
+            publicKeyHex: recipient.publicKeyHex,
+          }).signatureValid,
+        ).toBe(false);
+      });
+
+      it("detects tampered Transfer and Call signatures and fails closed on malformed hex in inspectAnySignedTx", () => {
+        const accounts = deriveAccountsFromMnemonic(goldenMnemonic, "", 2, CHAIN_IDS.TESTNET);
+        const sender = accounts[0];
+        const recipient = accounts[1];
+
+        const signedTransfer = signTransferTransaction({
+          privateKey: sender.secretKey,
+          to: recipient.publicKey,
+          amount: 500_000n,
+          nonce: 1n,
+          fee: 10_000n,
+          chainId: CHAIN_IDS.TESTNET,
+        });
+        const tamperedTransferBytes = new Uint8Array(signedTransfer.rawTxBytes);
+        tamperedTransferBytes[tamperedTransferBytes.length - 32 - 1] ^= 0xff;
+        const tamperedTransfer = inspectAnySignedTx(bytesToHex(tamperedTransferBytes), {
+          chainId: CHAIN_IDS.TESTNET,
+        });
+        expect(tamperedTransfer.kind).toBe("transfer");
+        expect(tamperedTransfer.signatureValid).toBe(false);
+
+        const contract = hexToBytes("44".repeat(32));
+        const signedCall = signAndSerializeTransaction(
+          {
+            sender: sender.publicKey,
+            nonce: 2n,
+            kind: buildTokenTransferCall(contract, recipient.publicKey, 100n),
+            fee: 15_000n,
+          },
+          sender.secretKey,
+          CHAIN_IDS.TESTNET,
+        );
+        const tamperedCallBytes = new Uint8Array(signedCall.rawTxBytes);
+        tamperedCallBytes[tamperedCallBytes.length - 32 - 1] ^= 0xff;
+        const tamperedCall = inspectAnySignedTx(bytesToHex(tamperedCallBytes), {
+          chainId: CHAIN_IDS.TESTNET,
+        });
+        expect(tamperedCall.kind).toBe("call");
+        expect(tamperedCall.signatureValid).toBe(false);
+
+        expect(() => inspectAnySignedTx("0xdeadbeef")).toThrow(KovanicaDecodeError);
+        expect(() => inspectAnySignedTx("")).toThrow(KovanicaDecodeError);
+      });
+
+      it("encodes, decodes, and verifies air-gap tx envelopes with BLAKE3 checksum and canonical network-tag pinning", () => {
+        expect(AIRGAP_ENVELOPE_PREFIX).toBe("kvnc-tx:v1:");
+        expect(AIRGAP_ENVELOPE_VERSION).toBe(1);
+
+        const accounts = deriveAccountsFromMnemonic(goldenMnemonic, "", 2, CHAIN_IDS.TESTNET);
+        const sender = accounts[0];
+        const recipient = accounts[1];
+
+        const signedTransfer = signTransferTransaction({
+          privateKey: sender.secretKey,
+          to: recipient.testnetAddress,
+          amount: 3_000_000_000n,
+          nonce: 4n,
+          fee: 10_000n,
+          chainId: CHAIN_IDS.TESTNET,
+        });
+
+        const wrapped = encodeAirgapTxEnvelope({
+          chainId: CHAIN_IDS.TESTNET,
+          kind: "transfer",
+          rawTxHex: signedTransfer.rawTxHex,
+          signingHashHex: signedTransfer.signingHashHex,
+        });
+
+        expect(wrapped.encoded.startsWith(AIRGAP_ENVELOPE_PREFIX)).toBe(true);
+        expect(wrapped.envelope.version).toBe(1);
+        expect(wrapped.envelope.chainId).toBe(CHAIN_IDS.TESTNET);
+        expect(wrapped.envelope.networkTag).toBe("2-24cdb5fadd98b207");
+        expect(wrapped.envelope.kind).toBe("transfer");
+        expect(wrapped.envelope.rawTxHex).toBe(`0x${signedTransfer.rawTxHex}`);
+        expect(wrapped.envelope.checksumHex).toMatch(/^[0-9a-f]{16}$/);
+
+        // Round-trip from compact kvnc-tx:v1:... string
+        const decodedCompact = decodeAirgapTxEnvelope(wrapped.encoded, {
+          expectedChainId: CHAIN_IDS.TESTNET,
+        });
+        expect(decodedCompact).toEqual(wrapped.envelope);
+
+        // Auto-verify embedded tx from decoded envelope
+        const verifiedInner = inspectAnySignedTx(decodedCompact.rawTxHex, {
+          chainId: decodedCompact.chainId,
+        });
+        expect(verifiedInner.kind).toBe("transfer");
+        expect(verifiedInner.signatureValid).toBe(true);
+
+        // Round-trip from raw JSON string
+        const decodedJson = decodeAirgapTxEnvelope(JSON.stringify(wrapped.envelope));
+        expect(decodedJson).toEqual(wrapped.envelope);
+
+        // Fail closed on expectedChainId mismatch
+        expect(() =>
+          decodeAirgapTxEnvelope(wrapped.encoded, { expectedChainId: CHAIN_IDS.MAINNET }),
+        ).toThrow(KovanicaDecodeError);
+
+        // Fail closed on tampered checksum
+        const badChecksumEnvelope = {
+          ...wrapped.envelope,
+          checksumHex: "0000000000000000",
+        };
+        expect(() => decodeAirgapTxEnvelope(JSON.stringify(badChecksumEnvelope))).toThrow(
+          KovanicaDecodeError,
+        );
+
+        // Fail closed on spoofed canonical network tag for Chain 2
+        expect(() =>
+          encodeAirgapTxEnvelope({
+            chainId: CHAIN_IDS.TESTNET,
+            networkTag: "2-0000000000000000",
+            kind: "transfer",
+            rawTxHex: signedTransfer.rawTxHex,
+          }),
+        ).toThrow(KovanicaDecodeError);
+
+        // Fail closed on malformed framing
+        expect(() => decodeAirgapTxEnvelope("kvnc-tx:v2:invalid")).toThrow(KovanicaDecodeError);
       });
     });
   });
