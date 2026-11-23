@@ -11,11 +11,11 @@ describe("Immutable SDK Pin & Traceability", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
     const pinnedSha = pkg?.kovanicaSdk?.testedRevision;
 
-    expect(pinnedSha).toBe("0de8d1c359fbe98076bb9eb8e122f147c3ab131d");
+    expect(pinnedSha).toBe("146cd10a6cd604c65bda81bd633c0ae1e1a619ab");
     expect(pinnedSha).toMatch(/^[0-9a-f]{40}$/);
 
     const ciWorkflow = fs.readFileSync(path.join(rootDir, ".github/workflows/ci.yml"), "utf8");
-    expect(ciWorkflow).toContain("repository: KovanicaProtokol/kovanica-sdk");
+    expect(ciWorkflow).toContain("repository: BetterCallDzuks/kovanica-sdk");
     expect(ciWorkflow).toContain(`ref: ${pinnedSha}`);
     expect(ciWorkflow).not.toContain("KovanicaDAG/kovanica-sdk");
     expect(ciWorkflow).not.toMatch(/repository:\s*KovanicaProtokol\/kovanica-sdk[\s\S]*?ref:\s*main/);

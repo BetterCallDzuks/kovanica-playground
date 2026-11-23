@@ -21,7 +21,7 @@ const PLAYGROUND_ROOT = resolve(__dirname, "..");
 
 const pkg = JSON.parse(readFileSync(join(PLAYGROUND_ROOT, "package.json"), "utf8"));
 const PINNED_SDK_SHA = pkg?.kovanicaSdk?.testedRevision;
-const SDK_REPO_URL = `${pkg?.kovanicaSdk?.repository || "https://github.com/KovanicaProtokol/kovanica-sdk"}.git`;
+const SDK_REPO_URL = `${pkg?.kovanicaSdk?.repository || "https://github.com/BetterCallDzuks/kovanica-sdk"}.git`;
 const SIBLING_SDK_DIR = resolve(PLAYGROUND_ROOT, "../kovanica-sdk");
 const INSTALLED_SDK_DIR = join(PLAYGROUND_ROOT, "node_modules", "kovanica-sdk");
 

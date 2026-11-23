@@ -22,8 +22,8 @@ jobs:
       - name: Checkout SDK dependency
         uses: actions/checkout@v4
         with:
-          repository: KovanicaProtokol/kovanica-sdk
-          ref: 0de8d1c359fbe98076bb9eb8e122f147c3ab131d
+          repository: BetterCallDzuks/kovanica-sdk
+          ref: 146cd10a6cd604c65bda81bd633c0ae1e1a619ab
           path: kovanica-sdk
 
       - name: Use Node.js ${{ matrix.node-version }}
