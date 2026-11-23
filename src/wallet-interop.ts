@@ -7,6 +7,7 @@ import {
   ADDRESS_PREFIX,
   bip39Seed,
   CHAIN_IDS,
+  ContractFacade,
   decodeAddress,
   decodeContractLog,
   decodeEscrowRecord,
@@ -17,24 +18,34 @@ import {
   decodeTokenMetadata,
   decodeTransactionReceiptLogs,
   decodeVaultRecord,
+  DEFAULT_IDEMPOTENT_RPC_METHODS,
   deriveBip44,
   derivePrefixedStorageSlot,
   deriveStorageSlotHex,
   dryRunBatchCalls,
   encodeAddress,
+  EscrowClient,
   estimateAndBuildCall,
   estimateBatchCalls,
   estimateCallTxSize,
   formatBip44Path,
   getPublicKey,
+  HtlcClient,
   KOVANICA_COIN_TYPE,
   KovanicaDecodeError,
+  MAX_JSONRPC_BATCH_SIZE,
+  MultisigClient,
+  NameRegistryClient,
+  NftClient,
   readContractStorage,
   TESTNET_ADDRESS_PREFIX,
+  TokenClient,
   toHexQuantity,
+  VaultClient,
   waitForTransactionReceipt,
   type BatchDryRunItemResult,
   type BatchDryRunResult,
+  type ContractFacadeClient,
   type ContractLogKind,
   type ContractLogKindResolver,
   type ContractStorageReadResult,
@@ -49,18 +60,31 @@ import {
   type DryRunCallClient,
   type DryRunCallOptions,
   type DryRunCallResult,
+  type EscrowCreateParams,
   type EstimateAndBuildCallClient,
   type EstimateAndBuildCallOptions,
   type EstimateBatchCallsOptions,
+  type HtlcCreateParams,
+  type JsonRpcBatchItemResult,
+  type JsonRpcBatchRequestItem,
+  type MultisigCreateParams,
+  type MultisigProposeParams,
+  type MultisigTxParams,
+  type NameRegisterParams,
+  type NameResolveOptions,
+  type NftMintParams,
   type PreparedBatchCallTransactions,
   type PreparedCallTransaction,
   type ReadContractStorageClient,
   type ReadContractStorageOptions,
   type ReceiptLogEntry,
   type ReceiptWithLogs,
+  type RequestOptions,
   type StorageSlotContract,
   type StorageSlotKey,
   type StorageSlotKind,
+  type TokenTransferParams,
+  type VaultCreateParams,
   type WaitForTransactionReceiptClient,
   type WaitForTransactionReceiptOptions,
 } from "kovanica-sdk";
@@ -743,19 +767,29 @@ export function runGoldenVectorSelfTest(): { ok: boolean; steps: SelfTestStep[] 
 // --- SDK v0.4.0 Fee/Gas Estimation & Typed Bincode State Decoders ---
 
 export {
+  ContractFacade,
   decodeContractLog,
   decodeTransactionReceiptLogs,
   derivePrefixedStorageSlot,
   deriveStorageSlotHex,
   dryRunBatchCalls,
+  EscrowClient,
   estimateAndBuildCall,
   estimateBatchCalls,
   estimateCallTxSize,
+  HtlcClient,
   KovanicaDecodeError,
+  MAX_JSONRPC_BATCH_SIZE,
+  MultisigClient,
+  NameRegistryClient,
+  NftClient,
   readContractStorage,
+  TokenClient,
+  VaultClient,
   waitForTransactionReceipt,
   type BatchDryRunItemResult,
   type BatchDryRunResult,
+  type ContractFacadeClient,
   type ContractLogKind,
   type ContractLogKindResolver,
   type ContractStorageReadResult,
@@ -770,18 +804,31 @@ export {
   type DryRunCallClient,
   type DryRunCallOptions,
   type DryRunCallResult,
+  type EscrowCreateParams,
   type EstimateAndBuildCallClient,
   type EstimateAndBuildCallOptions,
   type EstimateBatchCallsOptions,
+  type HtlcCreateParams,
+  type JsonRpcBatchItemResult,
+  type JsonRpcBatchRequestItem,
+  type MultisigCreateParams,
+  type MultisigProposeParams,
+  type MultisigTxParams,
+  type NameRegisterParams,
+  type NameResolveOptions,
+  type NftMintParams,
   type PreparedBatchCallTransactions,
   type PreparedCallTransaction,
   type ReadContractStorageClient,
   type ReadContractStorageOptions,
   type ReceiptLogEntry,
   type ReceiptWithLogs,
+  type RequestOptions,
   type StorageSlotContract,
   type StorageSlotKey,
   type StorageSlotKind,
+  type TokenTransferParams,
+  type VaultCreateParams,
   type WaitForTransactionReceiptClient,
   type WaitForTransactionReceiptOptions,
 };
@@ -1978,4 +2025,151 @@ export function parseImportedContractPresetsJson(rawJson: string): CallTxKind[] 
     };
   });
 }
+
+// --- JSON-RPC 2.0 Read-Only Batch Runner ---
+
+export const READ_ONLY_JSONRPC_BATCH_METHODS: ReadonlySet<string> = new Set(
+  DEFAULT_IDEMPOTENT_RPC_METHODS,
+);
+
+export const DEFAULT_JSONRPC_READ_BATCH_PRESET: ReadonlyArray<JsonRpcBatchRequestItem> = Object.freeze([
+  { method: "kovanica_chainId", params: [] },
+  { method: "kovanica_blockNumber", params: [] },
+  { method: "kovanica_estimateFee", params: [] },
+]);
+
+export interface JsonRpcBatchClient {
+  callBatch<TResult = unknown>(
+    requests: ReadonlyArray<JsonRpcBatchRequestItem>,
+    options?: RequestOptions,
+  ): Promise<Array<JsonRpcBatchItemResult<TResult>>>;
+}
+
+export type JsonRpcReadBatchEntry =
+  | {
+      index: number;
+      method: string;
+      ok: true;
+      result: unknown;
+    }
+  | {
+      index: number;
+      method: string;
+      ok: false;
+      error: {
+        code?: number;
+        message: string;
+        data?: unknown;
+      };
+    };
+
+export interface JsonRpcReadBatchSummary {
+  totalRequests: number;
+  succeededCount: number;
+  failedCount: number;
+  elapsedMs: number;
+  items: JsonRpcReadBatchEntry[];
+}
+
+/**
+ * Executes a bounded (`1..=MAX_JSONRPC_BATCH_SIZE`, i.e. `1..=32`) read-only JSON-RPC 2.0 batch
+ * in a single HTTP POST via `client.callBatch(requests, options)`.
+ *
+ * Rejects empty batches, oversized batches (> 32 items), and any non-read-only or state-mutating
+ * RPC methods (such as `kovanica_sendRawTransaction` or `kovanica_submitWork`) fail-closed before
+ * issuing any network request.
+ */
+export async function executeJsonRpcReadBatch(
+  client: JsonRpcBatchClient,
+  requests: ReadonlyArray<JsonRpcBatchRequestItem>,
+  options?: RequestOptions,
+): Promise<JsonRpcReadBatchSummary> {
+  if (!client || typeof client.callBatch !== "function") {
+    throw new KovanicaDecodeError(
+      "INVALID_INPUT",
+      "RPC client must provide a callBatch(requests, options) method",
+      { field: "client" },
+    );
+  }
+  if (!Array.isArray(requests)) {
+    throw new KovanicaDecodeError(
+      "INVALID_INPUT",
+      "JSON-RPC batch requests must be an array",
+      { field: "requests" },
+    );
+  }
+  if (requests.length < 1 || requests.length > MAX_JSONRPC_BATCH_SIZE) {
+    throw new KovanicaDecodeError(
+      "INVALID_INPUT",
+      `JSON-RPC read batch must contain between 1 and ${MAX_JSONRPC_BATCH_SIZE} requests (got ${requests.length})`,
+      { field: "requests" },
+    );
+  }
+
+  const normalizedRequests: JsonRpcBatchRequestItem[] = requests.map((item, idx) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        `Batch item at index ${idx} must be an object with { method, params? }`,
+        { field: `requests[${idx}]` },
+      );
+    }
+    const method = typeof item.method === "string" ? item.method.trim() : "";
+    if (method.length === 0) {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        `Batch item at index ${idx} is missing a non-empty method name`,
+        { field: `requests[${idx}].method` },
+      );
+    }
+    if (!READ_ONLY_JSONRPC_BATCH_METHODS.has(method)) {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        `Batch item at index ${idx} method "${method}" is not an allowlisted read-only JSON-RPC method`,
+        { field: `requests[${idx}].method` },
+      );
+    }
+    return item.params === undefined ? { method } : { method, params: item.params };
+  });
+
+  const startedAt = Date.now();
+  const rawResults = await client.callBatch(normalizedRequests, options);
+  const elapsedMs = Math.max(0, Date.now() - startedAt);
+
+  let succeededCount = 0;
+  let failedCount = 0;
+  const items: JsonRpcReadBatchEntry[] = rawResults.map((entry, idx) => {
+    const method = normalizedRequests[idx]?.method ?? "unknown";
+    if (entry.ok) {
+      succeededCount += 1;
+      return {
+        index: idx,
+        method,
+        ok: true,
+        result: entry.result,
+      };
+    }
+    failedCount += 1;
+    const rpcErr = entry.error as { code?: number; message?: string; data?: unknown } | undefined;
+    return {
+      index: idx,
+      method,
+      ok: false,
+      error: {
+        ...(typeof rpcErr?.code === "number" ? { code: rpcErr.code } : {}),
+        message: rpcErr?.message || String(entry.error),
+        ...(rpcErr?.data !== undefined ? { data: rpcErr.data } : {}),
+      },
+    };
+  });
+
+  return {
+    totalRequests: normalizedRequests.length,
+    succeededCount,
+    failedCount,
+    elapsedMs,
+    items,
+  };
+}
+
 

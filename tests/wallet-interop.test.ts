@@ -19,6 +19,7 @@ import {
   decodeContractLog,
   decodeContractStateHex,
   decodeTransactionReceiptLogs,
+  DEFAULT_JSONRPC_READ_BATCH_PRESET,
   deriveAccountsFromMnemonic,
   deriveContractStorageSlotHex,
   derivePrefixedStorageSlot,
@@ -27,28 +28,38 @@ import {
   encodeBincodeBytes32Vec,
   encodeBincodeString,
   encodeBincodeStringVec,
+  EscrowClient,
   estimateBatchCalls,
   estimateContractCall,
   estimateContractCallBatch,
+  executeJsonRpcReadBatch,
   exportContractPresetsJson,
   fetchAndDecodeContractStorageSlot,
   formatAddressForChain,
   generateMnemonic,
   hexToBytes,
+  HtlcClient,
   isStorageSlotEmpty,
   KovanicaDecodeError,
   MAX_CONTRACT_PRESETS_ITEMS,
   MAX_CONTRACT_PRESETS_JSON_BYTES,
+  MAX_JSONRPC_BATCH_SIZE,
+  MultisigClient,
+  NameRegistryClient,
+  NftClient,
   parseImportedContractPresetsJson,
   pollAndDecodeTransactionReceipt,
   readContractStorage,
   runGoldenVectorSelfTest,
   signAndSerializeTransaction,
+  TokenClient,
   u128le,
   u32le,
   u64le,
   validateMnemonic,
+  VaultClient,
   waitForTransactionReceipt,
+  type ContractFacadeClient,
   type UnsignedTx,
 } from "../src/wallet-interop";
 
@@ -1400,6 +1411,208 @@ describe("Ecosystem HD Wallet & Wasmi Contract Interoperability (PRO-53, PRO-48)
           ],
         });
         expect(() => parseImportedContractPresetsJson(oversizedJson)).toThrow(KovanicaDecodeError);
+      });
+    });
+
+    describe("SDK e5f3b79 Typed Contract Facades & JSON-RPC 2.0 Read Batch Runner", () => {
+      it("executes a bundled read-only JSON-RPC 2.0 batch in a single callBatch round-trip and isolates per-item errors", async () => {
+        let batchCalls = 0;
+        let capturedMethods: string[] = [];
+
+        const mockClient = {
+          callBatch: async (requests: ReadonlyArray<{ method: string; params?: unknown }>) => {
+            batchCalls += 1;
+            capturedMethods = requests.map((r) => r.method);
+            return [
+              { ok: true as const, result: "0x2" },
+              { ok: true as const, result: "0x10" },
+              {
+                ok: false as const,
+                error: Object.assign(new Error("Method temporarily unavailable"), {
+                  code: -32000,
+                  data: { detail: "fee oracle warming up" },
+                }),
+              },
+            ] as any;
+          },
+        };
+
+        const summary = await executeJsonRpcReadBatch(mockClient, DEFAULT_JSONRPC_READ_BATCH_PRESET);
+
+        expect(batchCalls).toBe(1);
+        expect(capturedMethods).toEqual([
+          "kovanica_chainId",
+          "kovanica_blockNumber",
+          "kovanica_estimateFee",
+        ]);
+        expect(summary.totalRequests).toBe(3);
+        expect(summary.succeededCount).toBe(2);
+        expect(summary.failedCount).toBe(1);
+        expect(summary.items[0]).toEqual({
+          index: 0,
+          method: "kovanica_chainId",
+          ok: true,
+          result: "0x2",
+        });
+        expect(summary.items[1]).toEqual({
+          index: 1,
+          method: "kovanica_blockNumber",
+          ok: true,
+          result: "0x10",
+        });
+        expect(summary.items[2]).toEqual({
+          index: 2,
+          method: "kovanica_estimateFee",
+          ok: false,
+          error: {
+            code: -32000,
+            message: "Method temporarily unavailable",
+            data: { detail: "fee oracle warming up" },
+          },
+        });
+      });
+
+      it("rejects empty batches, > MAX_JSONRPC_BATCH_SIZE batches, and state-mutating methods fail-closed", async () => {
+        let called = false;
+        const mockClient = {
+          callBatch: async () => {
+            called = true;
+            return [];
+          },
+        };
+
+        // Empty batch
+        await expect(executeJsonRpcReadBatch(mockClient, [])).rejects.toThrow(KovanicaDecodeError);
+
+        // Oversized batch (33 > MAX_JSONRPC_BATCH_SIZE=32)
+        const oversized = Array.from({ length: MAX_JSONRPC_BATCH_SIZE + 1 }, () => ({
+          method: "kovanica_blockNumber",
+          params: [],
+        }));
+        await expect(executeJsonRpcReadBatch(mockClient, oversized)).rejects.toThrow(
+          KovanicaDecodeError,
+        );
+
+        // State-mutating / non-read-only methods must be rejected before transport
+        await expect(
+          executeJsonRpcReadBatch(mockClient, [
+            { method: "kovanica_chainId", params: [] },
+            { method: "kovanica_sendRawTransaction", params: ["0xdeadbeef"] },
+          ]),
+        ).rejects.toThrow(KovanicaDecodeError);
+
+        await expect(
+          executeJsonRpcReadBatch(mockClient, [{ method: "kovanica_submitWork", params: [] }]),
+        ).rejects.toThrow(KovanicaDecodeError);
+
+        expect(called).toBe(false);
+      });
+
+      it("exposes and instantiates all 7 typed contract facades from kovanica-sdk", async () => {
+        const accounts = deriveAccountsFromMnemonic(goldenMnemonic, "", 2, CHAIN_IDS.TESTNET);
+        const contractHex = "33".repeat(32);
+        const pkA = accounts[0].publicKey;
+        const pkB = accounts[1].publicKey;
+
+        const multisigBytes = concat([
+          encodeBincodeBytes32Vec([pkA, pkB]),
+          u32le(2),
+          u64le(9n),
+        ]);
+
+        const mockFacadeClient: ContractFacadeClient = {
+          call: async () => "0x" as any,
+          estimateFee: async () => 10n,
+          getNonce: async () => 1n,
+          getStorageAt: async () => `0x${bytesToHex(multisigBytes)}`,
+        };
+
+        const nameClient = new NameRegistryClient(mockFacadeClient, contractHex);
+        const tokenClient = new TokenClient(mockFacadeClient, contractHex);
+        const escrowClient = new EscrowClient(mockFacadeClient, contractHex);
+        const htlcClient = new HtlcClient(mockFacadeClient, contractHex);
+        const nftClient = new NftClient(mockFacadeClient, contractHex);
+        const vaultClient = new VaultClient(mockFacadeClient, contractHex);
+        const multisigClient = new MultisigClient(mockFacadeClient, contractHex);
+
+        for (const facade of [
+          nameClient,
+          tokenClient,
+          escrowClient,
+          htlcClient,
+          nftClient,
+          vaultClient,
+          multisigClient,
+        ]) {
+          expect(facade.contractHex).toBe(contractHex);
+          expect(facade.contractAddress.startsWith("kvnc")).toBe(true);
+        }
+
+        const preparedName = await nameClient.prepareRegister(
+          {
+            name: "alice",
+            pubkey: pkB,
+            relayEndpoints: ["https://relay1.kovanica.org"],
+          },
+          { sender: accounts[0].testnetAddress, chainId: CHAIN_IDS.TESTNET },
+        );
+        expect(preparedName.call.method).toBe("name_register");
+
+        const preparedToken = await tokenClient.prepareTransfer(
+          {
+            recipient: pkB,
+            amount: 1_000n,
+          },
+          { sender: accounts[0].testnetAddress, chainId: CHAIN_IDS.TESTNET },
+        );
+        expect(preparedToken.call.method).toBe("token_transfer");
+
+        const preparedEscrow = await escrowClient.prepareCreate(
+          {
+            parties: [pkA, pkB],
+            threshold: 2,
+            amount: 500_000n,
+            deadline: 1_800_000_000n,
+          },
+          { sender: accounts[0].testnetAddress, chainId: CHAIN_IDS.TESTNET },
+        );
+        expect(preparedEscrow.call.method).toBe("escrow_create");
+
+        const preparedHtlc = await htlcClient.prepareCreate(
+          {
+            hashlock: hexToBytes("11".repeat(32)),
+            timelock: 1_800_000_000n,
+            recipient: pkB,
+          },
+          { sender: accounts[0].testnetAddress, chainId: CHAIN_IDS.TESTNET },
+        );
+        expect(preparedHtlc.call.method).toBe("htlc_create");
+
+        const preparedNft = await nftClient.prepareMint(
+          {
+            collection: hexToBytes("77".repeat(32)),
+            to: pkB,
+            tokenId: 1n,
+            tokenUri: "ipfs://example",
+          },
+          { sender: accounts[0].testnetAddress, chainId: CHAIN_IDS.TESTNET },
+        );
+        expect(preparedNft.call.method).toBe("nft_mint");
+
+        const preparedVault = await vaultClient.prepareCreate(
+          {
+            beneficiary: pkB,
+            amount: 100_000n,
+            lockUntil: 1_800_000_000_000n,
+          },
+          { sender: accounts[0].testnetAddress, chainId: CHAIN_IDS.TESTNET },
+        );
+        expect(preparedVault.call.method).toBe("vault_create");
+
+        const msState = await multisigClient.getState();
+        expect(msState).not.toBeNull();
+        expect(msState?.threshold).toBe(2);
+        expect(msState?.nextTxId).toBe(9n);
       });
     });
   });
