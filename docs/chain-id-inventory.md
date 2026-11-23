@@ -1,8 +1,8 @@
 # Canonical Chain-ID Inventory (`kovanica-playground` & `kovanica-sdk`)
 
 > **Scope & Alignment Notice:**
-> This document records the canonical 3-chain registry across `kovanica-playground`, `kovanica-sdk`, and the Kovanica L1 reference boundary (`crates/kovanica-params/src/lib.rs`, `crates/kovanica-types/src/address.rs`, and `crates/kovanica-types/src/signing.rs`).
-> Legacy/experimental Chain IDs `4` (`TESTNET_V2`), `5` (`hybrid5`), and `1337` (`LOCAL`) are retired.
+> This document records the canonical 3-chain registry across `kovanica-playground`, `BetterCallDzuks/kovanica-sdk` **`v0.5.0`** (pinned `testedRevision`: `7e267ab595515badcdc03c82c8eed40c2a1a2e2e`), and the Kovanica L1 reference boundary (`crates/kovanica-params/src/lib.rs`, `crates/kovanica-types/src/address.rs`, and `crates/kovanica-types/src/signing.rs`).
+> Legacy/experimental Chain IDs `4` (`TESTNET_V2`), `5` (`hybrid5`), and `1337` (`LOCAL`) are retired and removed from `CHAIN_IDS`.
 
 ---
 
@@ -29,33 +29,37 @@
    - **Legacy staking methods are chain-scoped.** Since L1 #272 (`4181fc6`), `kovanica_getValidators` (`there is no validator set`), `kovanica_getStake` (`stake is not used for consensus`), and `kovanica_getLeaderSchedule` (`there is no committee leader schedule`) return JSON-RPC `-32600` on Mainnet (`1`) and Testnet (`2`). The Playground still lists them in the method picker; selecting one on a hybrid node surfaces the node's `-32600` error verbatim. They remain available on Devnet (`3`).
 4. **Cryptographic Domain Separation & Replay Protection:**
    - Every signed L1 artifact embeds `chain_id` (`u64` little-endian) in its domain-separated preimage (`"KVNC/tx/v1"`, `"KVNC/vote/v1"`, `"KVNC/timeout/v1"`, `"KVNC/commit/v1"`, `"KVNC-VRF1-v1"`).
-5. **Network Identity Tag (`networkTag`) Handshake:**
+5. **Network Identity Tag (`networkTag`) Handshake & `X-Kovanica-*` HTTP Headers:**
    - `kovanica_syncStatus` returns `networkTag` formatted as `<chain_id>-<16_hex_genesis_prefix>` — official network tags are **`1-f35df34c92001436`** on Mainnet (frozen) (`1`, established by the L1 #290 `P4-3` genesis ceremony; bundle `kovanica-mainnet-genesis.tar.gz` `sha256: d0ac07ba0bbe7fff87f3a7713a19239ceebb201944b4984d579a1f5f60edd7bf`) and **`2-24cdb5fadd98b207`** on Testnet (`2`, live re-genesis; bundle `kovanica-testnet-genesis.tar.gz` `sha256: 0892ff8056b1a4d999141752d258750b02be7e141ae0e742b1721b3d2bcfd38a`) — which the Playground parses to detect mismatches between the user-selected network and the connected RPC endpoint.
+   - HTTP JSON-RPC responses also expose identity headers inspected by `kovanica-sdk v0.5.0`'s `probeRpcNode`:
+     - `X-Kovanica-Chain-Id` — parsed into `headerChainId` (`bigint`) and cross-checked against `kovanica_chainId` / `expectedChainId`.
+     - `X-Kovanica-Network-Tag` — verified against `NETWORK_TAGS.MAINNET` (`1-f35df34c92001436`) and `NETWORK_TAGS.TESTNET` (`2-24cdb5fadd98b207`), yielding `canonicalTagMatch: true | false | null` (`null` when the header or chain ID is absent, or on Devnet Chain `3`).
+     - `X-Kovanica-Rpc-Version` — surfaced as `rpcVersion` for node capability diagnostics.
 
 ---
 
 ## 3. Exact Source Inventory in `kovanica-playground`
 
 ### 3.1 `src/App.tsx`
-- **Line 36 (`selectedChainId` default state):**
+- **Line 38 (`selectedChainId` default state):**
   - `const [selectedChainId, setSelectedChainId] = useState<number>(CHAIN_IDS.TESTNET);`
   - Default UI target network dropdown starts at `CHAIN_IDS.TESTNET` (`2`).
-- **Lines 133–155 (`probeNode` chain-ID detection):**
+- **`probeNode` chain-ID detection:**
   - Attempts `client.getMiningInfo()` first; if supported, sets `connectedNodeChainId(mining.chain_id)`.
   - If `getMiningInfo()` throws (standard on non-hybrid development chain `3`), falls back to parsing the `<chain_id>-<genesis_hex>` prefix from `sync.networkTag`:
     ```ts
     const cid = Number.parseInt(sync.networkTag.split("-")[0], 10);
     ```
-- **Lines 208 & 317 (`validateParam` calls):**
+- **`validateParam` calls:**
   - Passes `selectedChainId` into `validateParam(param, val, selectedChainId)`, which enforces chain-specific address rules (`isValidAddress(str, chainId)`).
-- **Lines 419–421 & 540–552 (`hasNetworkMismatch` warning banner):**
+- **`hasNetworkMismatch` warning banner:**
   - Compares `connectedNodeChainId !== selectedChainId` and renders the `Chain Identity Mismatch Detected` warning banner with `selectedChainConfig?.name`, `selectedChainId`, and `connectedNodeChainId`.
-- **Lines 507–510 (Target Network `<select>` options):**
+- **Lines 510–512 (Target Network `<select>` options):**
   - Lists the three canonical networks:
     - `CHAIN_IDS.MAINNET` (`1`) — `"Mainnet (Chain 1)"`
     - `CHAIN_IDS.TESTNET` (`2`) — `"Testnet (Chain 2)"`
     - `CHAIN_IDS.DEVNET` (`3`) — `"Devnet (Chain 3)"`
-- **Lines 868–940 (Hybrid PoW & DAG Info side panel):**
+- **Hybrid PoW & DAG Info side panel:**
   - Dynamically labels `kovanica_getMiningInfo` metrics for Chain 1 (`"Mainnet metrics (Hybrid PoW + GHOSTDAG)"` / `"Chain 1"`) or Chain 2 (`"Chain 2 testnet metrics (ADR 0003)"` / `"Chain 2"`), with empty-state explanation: `"PoW Mining info is available on Hybrid PoW + GHOSTDAG networks: Mainnet (Chain 1) and Testnet (Chain 2). Devnet (Chain 3) uses a development parameter profile (also for local testing)."`
 
 ### 3.2 `src/methods.ts`
@@ -65,9 +69,22 @@
   - Defaults `chainId: number = CHAIN_IDS.MAINNET` (`1`, fail-closed strict PRO-21 validation).
   - Calls `isValidAddress(str, chainId)` from `kovanica-sdk`.
 
-### 3.3 `tests/`
+### 3.3 Interactive Developer Studios (`src/wallet-interop.ts`, `src/components/WalletContractConsole.tsx`, `src/components/WsSubscriptionConsole.tsx`)
+All 7 interactive developer studios powered by `kovanica-sdk v0.5.0` (`7e267ab595515badcdc03c82c8eed40c2a1a2e2e`) adhere to the canonical Chain `1` / `2` / `3` boundaries:
+1. **Typed Contract Facades Studio:** Direct read workflows across all 7 canonical Wasmi contract clients (`NameRegistryClient`, `TokenClient`, `EscrowClient`, `HtlcClient`, `NftClient`, `VaultClient`, `MultisigClient`), BLAKE3 storage slot derivation, and typed Bincode state decoding.
+2. **Inline WS Bincode Log Decoder:** Live WebSocket subscription console (`KovanicaWsClient`) with inline Bincode contract event decoding and reconnection diagnostics.
+3. **Contract Log History & Failover RPC Tester:** Chunked `getContractLogHistory` queries paired with a `FailoverHttpTransport` multi-endpoint health and automatic failover probe.
+4. **Raw Wire Tx Decoder & Node Capability Probe:** Offline Wasmi Call transaction decoding & Ed25519 signature verification (`decodeSignedCallTransaction`, `verifyCallTransactionSignature`) alongside `runNodeCapabilityProbe` / `probeRpcNode`, which executes a single-POST JSON-RPC 2.0 batch (`kovanica_chainId`, `kovanica_blockNumber`, `kovanica_estimateFee`), verifies `X-Kovanica-Chain-Id`, `X-Kovanica-Network-Tag`, and `X-Kovanica-Rpc-Version` response headers, and checks `canonicalTagMatch` against `1-f35df34c92001436` (Chain 1) and `2-24cdb5fadd98b207` (Chain 2).
+5. **Address Inspector & Transfer Tx Verifier:** Chain-aware PRO-21 / legacy address validation (`inspectAddress` — strict PRO-21 on Chains `1` & `2`, legacy hex allowed on Chain `3` Devnet) plus offline native Transfer transaction decoding and signature verification (`decodeSignedTransferTransaction`, `verifyTransferTransactionSignature`).
+6. **Universal Tx Auto-Decoder & Air-Gap Envelope Studio:** Automatic Transfer/Call variant detection (`peekTransactionVariant`, `decodeSignedTransactionAuto`, `verifySignedTransactionAuto`) and `kvnc-tx:v1:` BLAKE3-checksummed air-gap envelope wrapping and verification.
+7. **Mempool Fee-Tier Estimator (`kovanica_mempoolStats`):** Live `economy`, `standard`, and `priority` fee-per-byte recommendations via `parseMempoolFeeStats` and `computeFeeRecommendations` with graceful fallback to legacy `kovanica_estimateFee`.
+
+### 3.4 `tests/`
 - **`tests/methods.test.ts`:**
+  - Verifies that `package.json` (`kovanicaSdk.testedRevision`), `.github/workflows/ci.yml`, and resolved `node_modules/kovanica-sdk` match pinned `kovanica-sdk v0.5.0` SHA `7e267ab595515badcdc03c82c8eed40c2a1a2e2e`, and asserts exports including `probeRpcNode`.
   - Verifies that bare hex addresses (`0x00...00`) are rejected on `CHAIN_IDS.MAINNET` (`1`) and `CHAIN_IDS.TESTNET` (`2`), and accepted on `CHAIN_IDS.DEVNET` (`3`).
+- **`tests/wallet-interop.test.ts` & `tests/ws-console.test.tsx`:**
+  - Exercises chain-scoped signing, address formatting/inspection across Chains `1` / `2` / `3`, `probeRpcNode` header/tag verification, air-gap envelopes, mempool fee-tier estimation, and WS Bincode log decoding across the 7 developer studios.
 - **`tests/diagnostics-ui.test.tsx`:**
   - Uses canonical `chain_id: 2` / `"2-..."` fixtures for `kovanica_getMiningInfo` rendering and endpoint-change clearing tests.
 - **`tests/browser-rpc.test.ts`:**
@@ -75,13 +92,16 @@
 
 ---
 
-## 4. Upstream SDK Boundary (`kovanica-sdk`)
+## 4. Upstream SDK Boundary (`BetterCallDzuks/kovanica-sdk` `v0.5.0`)
 
+- **Pinned Revision:** `BetterCallDzuks/kovanica-sdk` **`v0.5.0`** at immutable commit `7e267ab595515badcdc03c82c8eed40c2a1a2e2e` (recorded in `package.json` → `kovanicaSdk.testedRevision`).
 - **`src/chains.ts`:**
-  - Exports `CHAIN_IDS` (`MAINNET: 1`, `TESTNET: 2`, `HYBRID_TESTNET: 2`, `DEVNET: 3`), `KNOWN_CHAINS`, `getChainConfig(chainId)`, and `isLegacyAddressAllowed(chainId)` (once `testedRevision` is bumped past `kovanica-sdk#11`, `LOCAL: 1337` is removed from `CHAIN_IDS`).
+  - Exports `CHAIN_IDS` (`MAINNET: 1`, `TESTNET: 2`, `HYBRID_TESTNET: 2`, `DEVNET: 3`), `NETWORK_TAGS` (`MAINNET: "1-f35df34c92001436"`, `TESTNET: "2-24cdb5fadd98b207"`), `KNOWN_CHAINS`, `getChainConfig(chainId)`, and `isLegacyAddressAllowed(chainId)`. Retired `LOCAL: 1337` is removed.
   - `isLegacyAddressAllowed(chainId)` returns `true` only for `DEVNET (3)`. It returns `false` for `MAINNET (1)`, `TESTNET (2)`, and all retired/unknown chain IDs.
 - **`src/address.ts`:**
-  - `isValidAddress(address, chainId)` and `parseAddressForChain(address, chainId)` delegate legacy fallback permission to `isLegacyAddressAllowed(chainId)` and enforce lowercase `0x` prefix on legacy hex strings.
+  - `isValidAddress(address, chainId)`, `parseAddressForChain(address, chainId)`, and `inspectAddress(address, chainId)` delegate legacy fallback permission to `isLegacyAddressAllowed(chainId)` and enforce lowercase `0x` prefix on legacy hex strings.
+- **`src/probe.ts`:**
+  - `probeRpcNode(url, options)` executes a single-POST JSON-RPC 2.0 batch (`kovanica_chainId`, `kovanica_blockNumber`, `kovanica_estimateFee`), parses `X-Kovanica-Chain-Id`, `X-Kovanica-Network-Tag`, and `X-Kovanica-Rpc-Version` HTTP response headers, and evaluates `canonicalTagMatch` against `NETWORK_TAGS.MAINNET` (`1-f35df34c92001436`) and `NETWORK_TAGS.TESTNET` (`2-24cdb5fadd98b207`).
 
 ---
 
