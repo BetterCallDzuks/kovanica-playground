@@ -17,6 +17,7 @@ import {
   buildTokenTransferCall,
   buildVaultCreateCall,
   bytesToHex,
+  computeFeeRecommendations,
   computeTransferTransactionSigningHash,
   concat,
   decodeAirgapTxEnvelope,
@@ -62,6 +63,7 @@ import {
   NftClient,
   normalizeAddressList,
   parseImportedContractPresetsJson,
+  parseMempoolFeeStats,
   peekTransactionVariant,
   pollAndDecodeTransactionReceipt,
   probeFailoverRpcEndpoints,
@@ -69,6 +71,7 @@ import {
   readContractStorage,
   runContractLogHistoryQuery,
   runGoldenVectorSelfTest,
+  runMempoolFeeTierProbe,
   runNodeCapabilityProbe,
   runTypedFacadeRead,
   signAndSerializeTransaction,
@@ -86,6 +89,7 @@ import {
   verifyTransferTransactionSignature,
   waitForTransactionReceipt,
   type ContractFacadeClient,
+  type MempoolFeeStats,
   type UnsignedTx,
 } from "../src/wallet-interop";
 
@@ -2592,6 +2596,114 @@ describe("Ecosystem HD Wallet & Wasmi Contract Interoperability (PRO-53, PRO-48)
 
         // Fail closed on malformed framing
         expect(() => decodeAirgapTxEnvelope("kvnc-tx:v2:invalid")).toThrow(KovanicaDecodeError);
+      });
+    });
+
+    describe("Mempool Fee-Tier Estimator (kovanica-sdk v0.5.0)", () => {
+      it("re-exports parseMempoolFeeStats and computeFeeRecommendations directly from kovanica-sdk", () => {
+        const parsed = parseMempoolFeeStats({
+          pending_count: 14,
+          total_bytes: 4200,
+          min_fee_per_byte: "0x0a",
+          p50_fee_per_byte: "0x14",
+          p90_fee_per_byte: "0x32",
+          max_fee_per_byte: "0x64",
+        });
+
+        expect(parsed).toEqual({
+          pendingCount: 14,
+          totalBytes: 4200,
+          minFeePerByte: 10n,
+          p50FeePerByte: 20n,
+          p90FeePerByte: 50n,
+          maxFeePerByte: 100n,
+        });
+
+        const recs = computeFeeRecommendations(parsed);
+        expect(recs.source).toBe("mempool");
+        expect(recs.economy).toBe(10n);
+        expect(recs.standard).toBeGreaterThanOrEqual(recs.economy);
+        expect(recs.priority).toBeGreaterThanOrEqual(recs.standard);
+      });
+
+      it("computes JSON-safe fee-tier recommendations from a populated mempool via runMempoolFeeTierProbe", async () => {
+        let estimateFeeCalls = 0;
+        const populatedStats: MempoolFeeStats = {
+          pendingCount: 25,
+          totalBytes: 8_192,
+          minFeePerByte: 10n,
+          p50FeePerByte: 25n,
+          p90FeePerByte: 60n,
+          maxFeePerByte: 120n,
+        };
+
+        const result = await runMempoolFeeTierProbe({
+          getMempoolStats: async () => populatedStats,
+          estimateFee: async () => {
+            estimateFeeCalls += 1;
+            return 15n;
+          },
+        });
+
+        expect(estimateFeeCalls).toBe(0);
+        expect(result.source).toBe("mempool");
+        expect(result.pendingCount).toBe(25);
+        expect(result.totalBytes).toBe(8_192);
+        expect(result.economyAtoms).toBe("10");
+        expect(BigInt(result.standardAtoms)).toBeGreaterThanOrEqual(BigInt(result.economyAtoms));
+        expect(BigInt(result.priorityAtoms)).toBeGreaterThanOrEqual(BigInt(result.standardAtoms));
+        expect(() => JSON.stringify(result)).not.toThrow();
+      });
+
+      it("falls back gracefully to estimateFee() when the mempool is empty", async () => {
+        let estimateFeeCalls = 0;
+        const emptyStats: MempoolFeeStats = {
+          pendingCount: 0,
+          totalBytes: 0,
+          minFeePerByte: null,
+          p50FeePerByte: null,
+          p90FeePerByte: null,
+          maxFeePerByte: null,
+        };
+
+        const result = await runMempoolFeeTierProbe({
+          getMempoolStats: async () => emptyStats,
+          estimateFee: async () => {
+            estimateFeeCalls += 1;
+            return 20n;
+          },
+        });
+
+        expect(estimateFeeCalls).toBe(1);
+        expect(result.source).toBe("fallback");
+        expect(result.pendingCount).toBe(0);
+        expect(result.totalBytes).toBe(0);
+        expect(result.economyAtoms).toBe("20");
+        expect(BigInt(result.standardAtoms)).toBeGreaterThanOrEqual(20n);
+        expect(BigInt(result.priorityAtoms)).toBeGreaterThanOrEqual(BigInt(result.standardAtoms));
+      });
+
+      it("falls back gracefully to estimateFee() when getMempoolStats() fails on legacy nodes", async () => {
+        let estimateFeeCalls = 0;
+
+        const result = await runMempoolFeeTierProbe({
+          getMempoolStats: async () => {
+            throw new Error("RPC -32601: Method not found (kovanica_mempoolStats)");
+          },
+          estimateFee: async () => {
+            estimateFeeCalls += 1;
+            return 30n;
+          },
+        });
+
+        expect(estimateFeeCalls).toBe(1);
+        expect(result.source).toBe("fallback");
+        expect(result.pendingCount).toBe(0);
+        expect(result.totalBytes).toBe(0);
+        expect(result.economyAtoms).toBe("30");
+        expect(BigInt(result.standardAtoms)).toBeGreaterThanOrEqual(30n);
+        expect(BigInt(result.priorityAtoms)).toBeGreaterThanOrEqual(BigInt(result.standardAtoms));
+        expect(() => JSON.stringify(result)).not.toThrow();
       });
     });
   });

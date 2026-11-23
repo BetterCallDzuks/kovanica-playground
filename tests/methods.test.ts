@@ -7,6 +7,7 @@ import {
   AIRGAP_ENVELOPE_VERSION,
   applyFeeBuffer,
   CHAIN_IDS,
+  computeFeeRecommendations,
   computeTransferTransactionSigningHash,
   createFailoverClient,
   decodeAirgapTxEnvelope,
@@ -26,6 +27,7 @@ import {
   NameRegistryClient,
   NftClient,
   normalizeAddressList,
+  parseMempoolFeeStats,
   peekTransactionVariant,
   probeRpcNode,
   readContractStorage,
@@ -45,6 +47,7 @@ import {
   AIRGAP_ENVELOPE_PREFIX as interopAirgapEnvelopePrefix,
   AIRGAP_ENVELOPE_VERSION as interopAirgapEnvelopeVersion,
   applyFeeBuffer as interopApplyFeeBuffer,
+  computeFeeRecommendations as interopComputeFeeRecommendations,
   computeTransferTransactionSigningHash as interopComputeTransferTransactionSigningHash,
   createFailoverClient as interopCreateFailoverClient,
   decodeAirgapTxEnvelope as interopDecodeAirgapTxEnvelope,
@@ -64,6 +67,7 @@ import {
   NameRegistryClient as interopNameRegistryClient,
   NftClient as interopNftClient,
   normalizeAddressList as interopNormalizeAddressList,
+  parseMempoolFeeStats as interopParseMempoolFeeStats,
   peekTransactionVariant as interopPeekTransactionVariant,
   probeRpcNode as interopProbeRpcNode,
   readContractStorage as interopReadContractStorage,
@@ -85,7 +89,7 @@ describe("Immutable SDK Pin & Traceability", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
     const pinnedSha = pkg?.kovanicaSdk?.testedRevision;
 
-    expect(pinnedSha).toBe("d4f7cb9aa15b0da84a1a7607894381cbdf29fd41");
+    expect(pinnedSha).toBe("7e267ab595515badcdc03c82c8eed40c2a1a2e2e");
     expect(pinnedSha).toMatch(/^[0-9a-f]{40}$/);
 
     const ciWorkflow = fs.readFileSync(path.join(rootDir, ".github/workflows/ci.yml"), "utf8");
@@ -145,6 +149,9 @@ describe("Immutable SDK Pin & Traceability", () => {
     expect(distContent).toContain("AIRGAP_ENVELOPE_VERSION");
     expect(distContent).toContain("encodeAirgapTxEnvelope");
     expect(distContent).toContain("decodeAirgapTxEnvelope");
+    expect(distContent).toContain("parseMempoolFeeStats");
+    expect(distContent).toContain("computeFeeRecommendations");
+    expect(distContent).toContain("getMempoolStats");
 
     expect(typeof readContractStorage).toBe("function");
     expect(typeof dryRunBatchCalls).toBe("function");
@@ -200,6 +207,10 @@ describe("Immutable SDK Pin & Traceability", () => {
     expect(interopAirgapEnvelopeVersion).toBe(AIRGAP_ENVELOPE_VERSION);
     expect(interopEncodeAirgapTxEnvelope).toBe(encodeAirgapTxEnvelope);
     expect(interopDecodeAirgapTxEnvelope).toBe(decodeAirgapTxEnvelope);
+    expect(typeof parseMempoolFeeStats).toBe("function");
+    expect(typeof computeFeeRecommendations).toBe("function");
+    expect(interopParseMempoolFeeStats).toBe(parseMempoolFeeStats);
+    expect(interopComputeFeeRecommendations).toBe(computeFeeRecommendations);
 
     // Assert all 7 typed contract facades + MAX_JSONRPC_BATCH_SIZE are exported and re-exported identically
     expect(MAX_JSONRPC_BATCH_SIZE).toBe(32);
