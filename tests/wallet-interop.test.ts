@@ -15,10 +15,12 @@ import {
   buildTokenTransferCall,
   buildVaultCreateCall,
   bytesToHex,
+  computeTransferTransactionSigningHash,
   concat,
   decodeContractLog,
   decodeContractStateHex,
   decodeSignedCallTransaction,
+  decodeSignedTransferTransaction,
   decodeTransactionReceiptLogs,
   DEFAULT_JSONRPC_READ_BATCH_PRESET,
   deriveAccountsFromMnemonic,
@@ -41,7 +43,9 @@ import {
   getContractLogHistory,
   hexToBytes,
   HtlcClient,
+  inspectAddress,
   inspectRawSignedCallTx,
+  inspectRawSignedTransferTx,
   isStorageSlotEmpty,
   KovanicaDecodeError,
   MAX_CONTRACT_PRESETS_ITEMS,
@@ -50,6 +54,7 @@ import {
   MultisigClient,
   NameRegistryClient,
   NftClient,
+  normalizeAddressList,
   parseImportedContractPresetsJson,
   pollAndDecodeTransactionReceipt,
   probeFailoverRpcEndpoints,
@@ -60,6 +65,7 @@ import {
   runNodeCapabilityProbe,
   runTypedFacadeRead,
   signAndSerializeTransaction,
+  signTransferTransaction,
   subscribeContractEvents,
   TokenClient,
   u128le,
@@ -69,6 +75,7 @@ import {
   VaultClient,
   verifyCallTransactionSignature,
   verifyEd25519,
+  verifyTransferTransactionSignature,
   waitForTransactionReceipt,
   type ContractFacadeClient,
   type UnsignedTx,
@@ -2197,6 +2204,172 @@ describe("Ecosystem HD Wallet & Wasmi Contract Interoperability (PRO-53, PRO-48)
         expect(failedSummary.ok).toBe(false);
         expect(failedSummary.batchSupported).toBe(false);
         expect(failedSummary.error).toBeTruthy();
+      });
+    });
+
+    describe("Address Inspector & Transfer Tx Verifier", () => {
+      it("inspects PRO-21 and legacy hex addresses with Chain 1/2/3 policy validation via inspectAddress", () => {
+        // Valid Mainnet PRO-21 address
+        const mainnetRes = inspectAddress(goldenCanonicalAddr, CHAIN_IDS.MAINNET);
+        expect(mainnetRes.valid).toBe(true);
+        expect(mainnetRes.format).toBe("pro21-mainnet");
+        expect(mainnetRes.checksumValid).toBe(true);
+        expect(mainnetRes.chainAllowed).toBe(true);
+        expect(mainnetRes.payloadHex).toBe(`0x${goldenPubkey}`);
+        expect(mainnetRes.canonicalMainnet).toBe(goldenCanonicalAddr);
+        expect(mainnetRes.canonicalTestnet).toBe(goldenTestnetAddr);
+
+        // Valid Testnet PRO-21 address
+        const testnetRes = inspectAddress(goldenTestnetAddr, CHAIN_IDS.TESTNET);
+        expect(testnetRes.valid).toBe(true);
+        expect(testnetRes.format).toBe("pro21-testnet");
+        expect(testnetRes.checksumValid).toBe(true);
+        expect(testnetRes.chainAllowed).toBe(true);
+
+        // Legacy 64-hex address: rejected on Mainnet (1) and Testnet (2), allowed on Devnet (3)
+        const legacyHex = `0x${goldenPubkey}`;
+        const legacyMainnet = inspectAddress(legacyHex, CHAIN_IDS.MAINNET);
+        expect(legacyMainnet.format).toBe("legacy-hex");
+        expect(legacyMainnet.chainAllowed).toBe(false);
+
+        const legacyTestnet = inspectAddress(legacyHex, CHAIN_IDS.TESTNET);
+        expect(legacyTestnet.format).toBe("legacy-hex");
+        expect(legacyTestnet.chainAllowed).toBe(false);
+
+        const legacyDevnet = inspectAddress(legacyHex, CHAIN_IDS.DEVNET);
+        expect(legacyDevnet.valid).toBe(true);
+        expect(legacyDevnet.format).toBe("legacy-hex");
+        expect(legacyDevnet.chainAllowed).toBe(true);
+        expect(legacyDevnet.canonicalMainnet).toBe(goldenCanonicalAddr);
+
+        // Invalid address never throws
+        const badRes = inspectAddress("kvncinvalidchecksum000000000000000000000000000000000000000000dag");
+        expect(badRes.valid).toBe(false);
+        expect(badRes.checksumValid).toBe(false);
+        expect(badRes.format).toBe("invalid");
+
+        // normalizeAddressList deduplicates and separates invalid entries
+        const normalized = normalizeAddressList([
+          goldenCanonicalAddr,
+          goldenTestnetAddr,
+          "not-an-address",
+        ]);
+        expect(normalized.valid).toEqual([goldenCanonicalAddr]);
+        expect(normalized.invalid).toHaveLength(1);
+        expect(normalized.invalid[0].input).toBe("not-an-address");
+      });
+
+      it("decodes and verifies a valid signed Transfer transaction offline via inspectRawSignedTransferTx", () => {
+        const accounts = deriveAccountsFromMnemonic(goldenMnemonic, "", 2, CHAIN_IDS.TESTNET);
+        const sender = accounts[0];
+        const recipient = accounts[1];
+
+        const signed = signTransferTransaction({
+          privateKey: sender.secretKey,
+          to: recipient.testnetAddress,
+          amount: 2_500_000_000n,
+          nonce: 12n,
+          fee: 10_000n,
+          chainId: CHAIN_IDS.TESTNET,
+        });
+
+        const inspected = inspectRawSignedTransferTx(`0x${signed.rawTxHex}`, {
+          chainId: BigInt(CHAIN_IDS.TESTNET),
+        });
+
+        expect(inspected.signatureValid).toBe(true);
+        expect(inspected.senderHex).toBe(`0x${sender.publicKeyHex}`);
+        expect(inspected.recipientHex).toBe(`0x${recipient.publicKeyHex}`);
+        expect(inspected.nonce).toBe("12");
+        expect(inspected.amount).toBe("2500000000");
+        expect(inspected.fee).toBe("10000");
+        expect(inspected.chainId).toBe(String(CHAIN_IDS.TESTNET));
+        expect(inspected.wireSizeBytes).toBe(196);
+        expect(inspected.signingHashHex).toBe(`0x${signed.signingHashHex}`);
+        expect(inspected.signatureHex).toBe(`0x${signed.signatureHex}`);
+
+        // Must be cleanly JSON-serializable without custom bigint replacer
+        const serialized = JSON.stringify(inspected);
+        expect(serialized).toContain('"signatureValid":true');
+        expect(serialized).toContain('"amount":"2500000000"');
+
+        // Explicit matching publicKeyHex verifies true; mismatched publicKeyHex verifies false
+        expect(
+          inspectRawSignedTransferTx(signed.rawTxHex, {
+            chainId: CHAIN_IDS.TESTNET,
+            publicKeyHex: `0x${sender.publicKeyHex}`,
+          }).signatureValid,
+        ).toBe(true);
+        expect(
+          inspectRawSignedTransferTx(signed.rawTxHex, {
+            chainId: CHAIN_IDS.TESTNET,
+            publicKeyHex: recipient.publicKeyHex,
+          }).signatureValid,
+        ).toBe(false);
+
+        // Wrong chainId invalidates the recomputed signing hash
+        expect(
+          inspectRawSignedTransferTx(signed.rawTxHex, {
+            chainId: CHAIN_IDS.MAINNET,
+          }).signatureValid,
+        ).toBe(false);
+
+        // Direct SDK re-exports work identically
+        const rawDecoded = decodeSignedTransferTransaction(signed.rawTxHex, {
+          chainId: CHAIN_IDS.TESTNET,
+        });
+        expect(verifyTransferTransactionSignature(rawDecoded)).toBe(true);
+        const recomputedHash = computeTransferTransactionSigningHash(
+          {
+            sender: sender.publicKey,
+            to: recipient.publicKey,
+            amount: 2_500_000_000n,
+            nonce: 12n,
+            fee: 10_000n,
+          },
+          CHAIN_IDS.TESTNET,
+        );
+        expect(bytesToHex(recomputedHash)).toBe(signed.signingHashHex);
+      });
+
+      it("detects tampered Transfer signatures and fails closed on malformed raw wire tx hex", () => {
+        const accounts = deriveAccountsFromMnemonic(goldenMnemonic, "", 2, CHAIN_IDS.TESTNET);
+        const sender = accounts[0];
+        const recipient = accounts[1];
+
+        const signed = signTransferTransaction({
+          privateKey: sender.secretKey,
+          to: recipient.publicKey,
+          amount: 1_000_000n,
+          nonce: 3n,
+          fee: 10_000n,
+          chainId: CHAIN_IDS.TESTNET,
+        });
+
+        // Flip one byte inside the 64-byte signature (which precedes the 32-byte wire hash)
+        const tamperedBytes = new Uint8Array(signed.rawTxBytes);
+        const sigByteIndex = tamperedBytes.length - 32 - 1;
+        tamperedBytes[sigByteIndex] ^= 0xff;
+        const tamperedHex = bytesToHex(tamperedBytes);
+
+        const tamperedResult = inspectRawSignedTransferTx(tamperedHex, {
+          chainId: CHAIN_IDS.TESTNET,
+        });
+        expect(tamperedResult.amount).toBe("1000000");
+        expect(tamperedResult.signatureValid).toBe(false);
+
+        // Malformed / truncated / empty hex throws KovanicaDecodeError
+        expect(() => inspectRawSignedTransferTx("0xdeadbeef")).toThrow(KovanicaDecodeError);
+        expect(() => inspectRawSignedTransferTx("0xzzzz")).toThrow(KovanicaDecodeError);
+        expect(() => inspectRawSignedTransferTx("")).toThrow(KovanicaDecodeError);
+
+        // Invalid publicKeyHex throws KovanicaDecodeError
+        expect(() =>
+          inspectRawSignedTransferTx(signed.rawTxHex, {
+            chainId: CHAIN_IDS.TESTNET,
+            publicKeyHex: "0x1234",
+          }),
+        ).toThrow(KovanicaDecodeError);
       });
     });
   });
