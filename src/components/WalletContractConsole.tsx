@@ -9,12 +9,16 @@ import {
   buildHtlcCreateCall,
   buildNameRegisterCall,
   buildNftMintCall,
+  buildPlaygroundCallCurlSnippet,
+  buildPlaygroundCallSdkSnippet,
   buildTokenTransferCall,
   buildVaultCreateCall,
+  bytesToHex,
   decodeContractStateHex,
   deriveAccountsFromMnemonic,
   deriveContractStorageSlotHex,
   estimateContractCall,
+  estimateContractCallBatch,
   fetchAndDecodeContractStorageSlot,
   generateMnemonic,
   hexToBytes,
@@ -25,6 +29,7 @@ import {
   type CallTxKind,
   type ContractDecoderKind,
   type DerivedAccountInfo,
+  type PreparedContractCallBatch,
   type PreparedCallTransaction,
   type SelfTestStep,
   type TxKind,
@@ -34,12 +39,13 @@ import {
 interface Props {
   client: KovanicaClient;
   selectedChainId: number;
+  rpcUrl?: string;
 }
 
 const GOLDEN_MNEMONIC =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
-export function WalletContractConsole({ client, selectedChainId }: Props) {
+export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props) {
   // Mnemonic state
   const [mnemonic, setMnemonic] = useState<string>(GOLDEN_MNEMONIC);
   const [passphrase, setPassphrase] = useState<string>("");
@@ -114,6 +120,15 @@ export function WalletContractConsole({ client, selectedChainId }: Props) {
   const [isEstimating, setIsEstimating] = useState<boolean>(false);
   const [preparedEstimate, setPreparedEstimate] = useState<PreparedCallTransaction | null>(null);
 
+  // Multi-Call Batch Estimator & Code Exporter state
+  const [batchQueue, setBatchQueue] = useState<CallTxKind[]>([]);
+  const [isEstimatingBatch, setIsEstimatingBatch] = useState<boolean>(false);
+  const [batchEstimateResult, setBatchEstimateResult] = useState<PreparedContractCallBatch | null>(null);
+  const [activeCodeSnippet, setActiveCodeSnippet] = useState<{
+    kind: "curl" | "sdk";
+    code: string;
+  } | null>(null);
+
   // SDK v0.4.0 Contract State Bincode Decoder & Live Storage Slot Fetch state
   const [decoderKind, setDecoderKind] = useState<ContractDecoderKind>("name");
   const [storageContractAddr, setStorageContractAddr] = useState<string>("0x" + "33".repeat(32));
@@ -157,7 +172,9 @@ export function WalletContractConsole({ client, selectedChainId }: Props) {
   };
 
   const copyToClipboard = (text: string, label: string) => {
-    navigator.clipboard.writeText(text);
+    if (typeof navigator !== "undefined" && navigator.clipboard) {
+      navigator.clipboard.writeText(text);
+    }
     setCopySuccess(label);
     setTimeout(() => setCopySuccess(null), 2000);
   };
@@ -249,6 +266,15 @@ export function WalletContractConsole({ client, selectedChainId }: Props) {
     throw new Error(`Estimate is only supported for Wasmi contract call actions (got ${txType})`);
   };
 
+  const resolvedRpcUrl = useMemo(() => {
+    if (rpcUrl && rpcUrl.trim().length > 0) return rpcUrl.trim();
+    const clientUrl = (client as unknown as { url?: string })?.url;
+    if (typeof clientUrl === "string" && clientUrl.trim().length > 0) {
+      return clientUrl.trim();
+    }
+    return "http://127.0.0.1:8545/rpc";
+  }, [rpcUrl, client]);
+
   const handleEstimateCall = async () => {
     setErrorMsg(null);
     setPreparedEstimate(null);
@@ -272,6 +298,81 @@ export function WalletContractConsole({ client, selectedChainId }: Props) {
       setErrorMsg(`Fee estimation failed: ${err?.message || String(err)}`);
     } finally {
       setIsEstimating(false);
+    }
+  };
+
+  const handleQueueToBatch = () => {
+    setErrorMsg(null);
+    try {
+      const callKind = buildActiveCallKind();
+      setBatchQueue((prev) => [...prev, callKind]);
+      setBatchEstimateResult(null);
+    } catch (err: any) {
+      setErrorMsg(`Cannot queue call to batch: ${err?.message || String(err)}`);
+    }
+  };
+
+  const handleClearBatch = () => {
+    setBatchQueue([]);
+    setBatchEstimateResult(null);
+  };
+
+  const handleEstimateBatch = async () => {
+    setErrorMsg(null);
+    setBatchEstimateResult(null);
+    if (!activeAccount) {
+      setErrorMsg("No active account available for batch estimation");
+      return;
+    }
+    setIsEstimatingBatch(true);
+    try {
+      const callsToEstimate =
+        batchQueue.length > 0 ? batchQueue : [buildActiveCallKind()];
+      if (batchQueue.length === 0) {
+        setBatchQueue(callsToEstimate);
+      }
+      const batchRes = await estimateContractCallBatch(client, callsToEstimate, {
+        sender: activeAccount.address,
+        chainId: selectedChainId,
+      });
+      setBatchEstimateResult(batchRes);
+    } catch (err: any) {
+      setErrorMsg(`Batch estimation failed: ${err?.message || String(err)}`);
+    } finally {
+      setIsEstimatingBatch(false);
+    }
+  };
+
+  const handleExportCurlSnippet = () => {
+    setErrorMsg(null);
+    try {
+      const callKind = buildActiveCallKind();
+      const snippet = buildPlaygroundCallCurlSnippet({
+        rpcUrl: resolvedRpcUrl,
+        call: callKind,
+        sender: activeAccount?.address,
+      });
+      setActiveCodeSnippet({ kind: "curl", code: snippet });
+      copyToClipboard(snippet, "curl-snippet");
+    } catch (err: any) {
+      setErrorMsg(`Failed to generate cURL snippet: ${err?.message || String(err)}`);
+    }
+  };
+
+  const handleExportSdkSnippet = () => {
+    setErrorMsg(null);
+    try {
+      const callKind = buildActiveCallKind();
+      const snippet = buildPlaygroundCallSdkSnippet({
+        rpcUrl: resolvedRpcUrl,
+        call: callKind,
+        sender: activeAccount?.address,
+        chainId: selectedChainId,
+      });
+      setActiveCodeSnippet({ kind: "sdk", code: snippet });
+      copyToClipboard(snippet, "sdk-snippet");
+    } catch (err: any) {
+      setErrorMsg(`Failed to generate SDK snippet: ${err?.message || String(err)}`);
     }
   };
 
@@ -1036,17 +1137,190 @@ export function WalletContractConsole({ client, selectedChainId }: Props) {
           </button>
 
           {txType !== "transfer" && (
-            <button
-              type="button"
-              data-testid="estimate-call-btn"
-              onClick={handleEstimateCall}
-              disabled={!isMnemonicValid || isEstimating}
-              className="px-4 py-2.5 bg-surface-2 hover:bg-border text-fg font-medium rounded-lg text-xs border border-border transition-colors disabled:opacity-50"
-            >
-              {isEstimating ? "Estimating..." : "Estimate Fee & Nonce (SDK)"}
-            </button>
+            <>
+              <button
+                type="button"
+                data-testid="estimate-call-btn"
+                onClick={handleEstimateCall}
+                disabled={!isMnemonicValid || isEstimating}
+                className="px-4 py-2.5 bg-surface-2 hover:bg-border text-fg font-medium rounded-lg text-xs border border-border transition-colors disabled:opacity-50"
+              >
+                {isEstimating ? "Estimating..." : "Estimate Fee & Nonce (SDK)"}
+              </button>
+
+              <button
+                type="button"
+                data-testid="queue-batch-call-btn"
+                onClick={handleQueueToBatch}
+                disabled={!isMnemonicValid}
+                className="px-3.5 py-2.5 bg-surface-2 hover:bg-border text-fg font-medium rounded-lg text-xs border border-border transition-colors disabled:opacity-50"
+              >
+                Queue to Batch ({batchQueue.length})
+              </button>
+
+              <button
+                type="button"
+                data-testid="estimate-batch-btn"
+                onClick={handleEstimateBatch}
+                disabled={!isMnemonicValid || isEstimatingBatch}
+                className="px-3.5 py-2.5 bg-gold/20 hover:bg-gold/30 text-gold font-semibold rounded-lg text-xs border border-gold/40 transition-colors disabled:opacity-50"
+              >
+                {isEstimatingBatch ? "Estimating Batch..." : "Estimate Batch"}
+              </button>
+
+              {batchQueue.length > 0 && (
+                <button
+                  type="button"
+                  data-testid="clear-batch-btn"
+                  onClick={handleClearBatch}
+                  className="px-3 py-2.5 bg-surface-2 hover:bg-border text-muted hover:text-fg font-medium rounded-lg text-xs border border-border transition-colors"
+                >
+                  Clear Batch
+                </button>
+              )}
+
+              <button
+                type="button"
+                data-testid="copy-curl-snippet-btn"
+                onClick={handleExportCurlSnippet}
+                disabled={!isMnemonicValid}
+                className="px-3.5 py-2.5 bg-surface-2 hover:bg-border text-fg font-medium rounded-lg text-xs border border-border transition-colors disabled:opacity-50"
+              >
+                {copySuccess === "curl-snippet" ? "Copied cURL!" : "Copy JSON-RPC cURL"}
+              </button>
+
+              <button
+                type="button"
+                data-testid="copy-sdk-snippet-btn"
+                onClick={handleExportSdkSnippet}
+                disabled={!isMnemonicValid}
+                className="px-3.5 py-2.5 bg-surface-2 hover:bg-border text-fg font-medium rounded-lg text-xs border border-border transition-colors disabled:opacity-50"
+              >
+                {copySuccess === "sdk-snippet" ? "Copied SDK!" : "Copy SDK Snippet"}
+              </button>
+            </>
           )}
         </div>
+
+        {activeCodeSnippet && txType !== "transfer" && (
+          <div
+            data-testid="code-exporter-preview"
+            className="bg-surface-2 border border-border rounded-lg p-3 flex flex-col gap-2 text-xs"
+          >
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-fg">
+                {activeCodeSnippet.kind === "curl"
+                  ? "JSON-RPC cURL Command (kovanica_call)"
+                  : "TypeScript kovanica-sdk Snippet (estimateAndBuildCall + dryRunCall)"}
+              </span>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() =>
+                    copyToClipboard(
+                      activeCodeSnippet.code,
+                      activeCodeSnippet.kind === "curl" ? "curl-snippet" : "sdk-snippet",
+                    )
+                  }
+                  className="text-gold hover:underline font-medium"
+                >
+                  Copy
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveCodeSnippet(null)}
+                  className="text-muted hover:text-fg"
+                >
+                  Hide
+                </button>
+              </div>
+            </div>
+            <pre
+              data-testid="code-exporter-snippet"
+              className="bg-surface border border-border/60 rounded p-2.5 font-mono text-[11px] text-emerald-400 overflow-x-auto"
+            >
+              {activeCodeSnippet.code}
+            </pre>
+          </div>
+        )}
+
+        {(batchQueue.length > 0 || batchEstimateResult) && txType !== "transfer" && (
+          <div
+            data-testid="batch-estimator-panel"
+            className="bg-surface-2/80 border border-gold/30 rounded-lg p-3.5 flex flex-col gap-2.5 text-xs"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 pb-2">
+              <span className="font-semibold text-fg">
+                Multi-Call Batch Estimator ({batchEstimateResult ? batchEstimateResult.calls.length : batchQueue.length} Call{(batchEstimateResult ? batchEstimateResult.calls.length : batchQueue.length) === 1 ? "" : "s"})
+              </span>
+              {batchEstimateResult && (
+                <div
+                  data-testid="batch-estimate-totals"
+                  className="font-mono flex flex-wrap gap-x-4 gap-y-1 text-muted"
+                >
+                  <span>
+                    Total Size: <strong className="text-fg">{batchEstimateResult.totalEstimatedTxSize}B</strong>
+                  </span>
+                  <span>
+                    Rate: <strong className="text-fg">{batchEstimateResult.feeRatePerByte.toString()} atoms/B</strong>
+                  </span>
+                  <span>
+                    Total Fee (+20%): <strong className="text-gold">{batchEstimateResult.totalFee.toString()} atoms</strong>
+                  </span>
+                  <span>
+                    Total Gas: <strong className="text-fg">{batchEstimateResult.totalGasLimit.toString()}</strong>
+                  </span>
+                  {batchEstimateResult.startNonce !== undefined && (
+                    <span>
+                      Start Nonce: <strong className="text-fg">{batchEstimateResult.startNonce.toString()}</strong>
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {batchEstimateResult ? (
+              <div className="flex flex-col gap-1.5 font-mono text-[11px]">
+                {batchEstimateResult.calls.map((item: PreparedCallTransaction, idx: number) => (
+                  <div
+                    key={idx}
+                    data-testid={`batch-call-row-${idx}`}
+                    className="bg-surface border border-border/60 rounded px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2"
+                  >
+                    <span className="text-fg font-semibold">
+                      #{idx + 1} {item.call.method}
+                    </span>
+                    <div className="flex flex-wrap gap-x-4 text-muted">
+                      <span>
+                        Nonce: <strong className="text-fg">{item.nonce !== undefined ? item.nonce.toString() : "—"}</strong>
+                      </span>
+                      <span>
+                        Wire Size: <strong className="text-fg">{item.estimatedTxSize}B</strong>
+                      </span>
+                      <span>
+                        Fee: <strong className="text-gold">{item.fee.toString()} atoms</strong>
+                      </span>
+                      <span>
+                        Gas: <strong className="text-fg">{item.gasLimit.toString()}</strong>
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="flex flex-wrap gap-2 font-mono text-[11px] text-muted">
+                {batchQueue.map((queued, idx) => (
+                  <span
+                    key={idx}
+                    className="bg-surface border border-border/60 rounded px-2 py-1 text-fg"
+                  >
+                    #{idx + 1} {queued.method} ({bytesToHex(queued.args).slice(0, 12)}...)
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {preparedEstimate && (
           <div

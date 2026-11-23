@@ -10,6 +10,8 @@ import {
   buildNameRegisterCallTx,
   buildNftMintCall,
   buildNftMintCallTx,
+  buildPlaygroundCallCurlSnippet,
+  buildPlaygroundCallSdkSnippet,
   buildTokenTransferCall,
   buildVaultCreateCall,
   bytesToHex,
@@ -23,6 +25,7 @@ import {
   encodeBincodeString,
   encodeBincodeStringVec,
   estimateContractCall,
+  estimateContractCallBatch,
   fetchAndDecodeContractStorageSlot,
   formatAddressForChain,
   generateMnemonic,
@@ -726,6 +729,125 @@ describe("Ecosystem HD Wallet & Wasmi Contract Interoperability (PRO-53, PRO-48)
           { contractAddress, kind: "name", key: "alice" },
         ),
       ).rejects.toThrow(/RPC -32000: storage backend unavailable/);
+    });
+
+    it("estimates a multi-call batch with sequential nonces, single fee lookup, and aggregate totals via estimateContractCallBatch", async () => {
+      const accounts = deriveAccountsFromMnemonic(goldenMnemonic, "", 2, CHAIN_IDS.TESTNET);
+      const contract = hexToBytes("33".repeat(32));
+
+      const call1 = buildNameRegisterCallTx(
+        contract,
+        "alice",
+        accounts[1].publicKey,
+        ["https://relay1.kovanica.org"],
+      );
+      const call2 = buildTokenTransferCall(contract, accounts[1].publicKey, 500_000n);
+      const call3 = buildHtlcCreateCallTx(
+        contract,
+        hexToBytes("11".repeat(32)),
+        1750000000n,
+        accounts[1].publicKey,
+      );
+
+      let estimateFeeCallCount = 0;
+      let getNonceCallCount = 0;
+
+      const mockClient = {
+        estimateFee: async () => {
+          estimateFeeCallCount++;
+          return 20n;
+        },
+        getNonce: async (addr: string) => {
+          getNonceCallCount++;
+          expect(addr).toBe(accounts[0].testnetAddress);
+          return 10n;
+        },
+      };
+
+      const batchResult = await estimateContractCallBatch(
+        mockClient,
+        [call1, call2, call3],
+        {
+          sender: accounts[0].testnetAddress,
+          chainId: CHAIN_IDS.TESTNET,
+        },
+      );
+
+      // Single RPC fee lookup & single nonce lookup
+      expect(estimateFeeCallCount).toBe(1);
+      expect(getNonceCallCount).toBe(1);
+
+      expect(batchResult.startNonce).toBe(10n);
+      expect(batchResult.feeRatePerByte).toBe(20n);
+      expect(batchResult.chainId).toBe(CHAIN_IDS.TESTNET);
+      expect(batchResult.calls.length).toBe(3);
+
+      // Sequential nonces: startNonce + i
+      expect(batchResult.calls[0].nonce).toBe(10n);
+      expect(batchResult.calls[1].nonce).toBe(11n);
+      expect(batchResult.calls[2].nonce).toBe(12n);
+
+      // Per-call +20% margined fee & aggregate totals match sum of individual calls
+      let expectedTotalFee = 0n;
+      let expectedTotalGas = 0n;
+      let expectedTotalSize = 0;
+      for (const item of batchResult.calls) {
+        const baseFee = 20n * BigInt(item.estimatedTxSize);
+        const expectedCallFee = (baseFee * 12_000n + 9_999n) / 10_000n;
+        expect(item.fee).toBe(expectedCallFee);
+        expectedTotalFee += item.fee;
+        expectedTotalGas += item.gasLimit;
+        expectedTotalSize += item.estimatedTxSize;
+      }
+
+      expect(batchResult.totalFee).toBe(expectedTotalFee);
+      expect(batchResult.totalGasLimit).toBe(expectedTotalGas);
+      expect(batchResult.totalEstimatedTxSize).toBe(expectedTotalSize);
+
+      // Rejects empty batch fail-closed before any RPC I/O
+      await expect(estimateContractCallBatch(mockClient, [])).rejects.toThrow(RangeError);
+      expect(estimateFeeCallCount).toBe(1);
+    });
+
+    it("generates ready-to-run JSON-RPC cURL and kovanica-sdk TypeScript snippets for a contract call", () => {
+      const accounts = deriveAccountsFromMnemonic(goldenMnemonic, "", 2, CHAIN_IDS.TESTNET);
+      const contract = hexToBytes("33".repeat(32));
+      const call = buildNameRegisterCallTx(
+        contract,
+        "alice",
+        accounts[1].publicKey,
+        ["https://relay1.kovanica.org"],
+      );
+
+      const curlSnippet = buildPlaygroundCallCurlSnippet({
+        rpcUrl: "http://127.0.0.1:8545/rpc",
+        call,
+        sender: accounts[0].testnetAddress,
+      });
+
+      expect(curlSnippet).toContain('curl -sS -X POST "http://127.0.0.1:8545/rpc"');
+      expect(curlSnippet).toContain('"method": "kovanica_call"');
+      expect(curlSnippet).toContain('"entry": "name_register"');
+      expect(curlSnippet).toContain(`"data": "0x${bytesToHex(call.args)}"`);
+      expect(curlSnippet).toContain(`"from": "${accounts[0].mainnetAddress}"`);
+      expect(curlSnippet).toContain('"gas": "0x186a0"');
+
+      const sdkSnippet = buildPlaygroundCallSdkSnippet({
+        rpcUrl: "http://127.0.0.1:8545/rpc",
+        call,
+        sender: accounts[0].testnetAddress,
+        chainId: CHAIN_IDS.TESTNET,
+      });
+
+      expect(sdkSnippet).toContain('import {');
+      expect(sdkSnippet).toContain('KovanicaClient');
+      expect(sdkSnippet).toContain('estimateAndBuildCall');
+      expect(sdkSnippet).toContain('dryRunCall');
+      expect(sdkSnippet).toContain(`contract: "0x${"33".repeat(32)}"`);
+      expect(sdkSnippet).toContain('method: "name_register"');
+      expect(sdkSnippet).toContain(`args: hexToBytes("${bytesToHex(call.args)}")`);
+      expect(sdkSnippet).toContain(`sender: "${accounts[0].testnetAddress}"`);
+      expect(sdkSnippet).toContain("chainId: CHAIN_IDS.TESTNET");
     });
   });
 });
