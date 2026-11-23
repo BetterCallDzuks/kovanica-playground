@@ -5,6 +5,8 @@ import { generateMnemonic as scureGenerateMnemonic, validateMnemonic as scureVal
 import { wordlist } from "@scure/bip39/wordlists/english.js";
 import {
   ADDRESS_PREFIX,
+  AIRGAP_ENVELOPE_PREFIX,
+  AIRGAP_ENVELOPE_VERSION,
   applyFeeBuffer,
   bip39Seed,
   CHAIN_IDS,
@@ -12,6 +14,7 @@ import {
   ContractFacade,
   createFailoverClient,
   decodeAddress,
+  decodeAirgapTxEnvelope,
   decodeContractLog,
   decodeEscrowRecord,
   decodeHtlcRecord,
@@ -19,6 +22,7 @@ import {
   decodeNameRecord,
   decodeNftMetadata,
   decodeSignedCallTransaction,
+  decodeSignedTransactionAuto,
   decodeSignedTransferTransaction,
   decodeTokenMetadata,
   decodeTransactionReceiptLogs,
@@ -30,6 +34,7 @@ import {
   deriveStorageSlotHex,
   dryRunBatchCalls,
   encodeAddress,
+  encodeAirgapTxEnvelope,
   EscrowClient,
   estimateAndBuildCall,
   estimateBatchCalls,
@@ -49,6 +54,7 @@ import {
   NameRegistryClient,
   NftClient,
   normalizeAddressList,
+  peekTransactionVariant,
   probeRpcNode,
   readContractStorage,
   sanitizeRpcUrl,
@@ -60,11 +66,14 @@ import {
   VaultClient,
   verifyCallTransactionSignature,
   verifyEd25519,
+  verifySignedTransactionAuto,
   verifyTransferTransactionSignature,
   waitForTransactionFinality,
   waitForTransactionReceipt,
   type AddressFormat,
   type AddressInspectionResult,
+  type AirgapTxEnvelope,
+  type AirgapTxKind,
   type BatchDryRunItemResult,
   type BatchDryRunResult,
   type ContractEventSubscriptionHandle,
@@ -75,11 +84,14 @@ import {
   type ContractLogKindResolver,
   type ContractStorageReadResult,
   type ContractStorageTarget,
+  type DecodeAirgapTxEnvelopeOptions,
   type DecodedContractEvent,
   type DecodedContractLog,
   type DecodedContractLogByKind,
   type DecodedSignedCallTransaction,
   type DecodeSignedCallTransactionOptions,
+  type DecodedSignedTransactionAuto,
+  type DecodeSignedTransactionAutoOptions,
   type DecodedSignedTransferTransaction,
   type DecodeSignedTransferTransactionOptions,
   type DecodedTransactionReceiptLog,
@@ -90,6 +102,8 @@ import {
   type DryRunCallClient,
   type DryRunCallOptions,
   type DryRunCallResult,
+  type EncodeAirgapTxEnvelopeInput,
+  type EncodedAirgapTxEnvelope,
   type EscrowCreateParams,
   type EstimateAndBuildCallClient,
   type EstimateAndBuildCallOptions,
@@ -821,18 +835,23 @@ export function runGoldenVectorSelfTest(): { ok: boolean; steps: SelfTestStep[] 
 // --- SDK v0.4.0 Fee/Gas Estimation & Typed Bincode State Decoders ---
 
 export {
+  AIRGAP_ENVELOPE_PREFIX,
+  AIRGAP_ENVELOPE_VERSION,
   applyFeeBuffer,
   computeTransferTransactionSigningHash,
   ContractFacade,
   createFailoverClient,
   DEFAULT_LOG_HISTORY_CHUNK_SIZE,
+  decodeAirgapTxEnvelope,
   decodeContractLog,
   decodeSignedCallTransaction,
+  decodeSignedTransactionAuto,
   decodeSignedTransferTransaction,
   decodeTransactionReceiptLogs,
   derivePrefixedStorageSlot,
   deriveStorageSlotHex,
   dryRunBatchCalls,
+  encodeAirgapTxEnvelope,
   EscrowClient,
   estimateAndBuildCall,
   estimateBatchCalls,
@@ -848,6 +867,7 @@ export {
   NameRegistryClient,
   NftClient,
   normalizeAddressList,
+  peekTransactionVariant,
   probeRpcNode,
   readContractStorage,
   sanitizeRpcUrl,
@@ -857,11 +877,14 @@ export {
   VaultClient,
   verifyCallTransactionSignature,
   verifyEd25519,
+  verifySignedTransactionAuto,
   verifyTransferTransactionSignature,
   waitForTransactionFinality,
   waitForTransactionReceipt,
   type AddressFormat,
   type AddressInspectionResult,
+  type AirgapTxEnvelope,
+  type AirgapTxKind,
   type BatchDryRunItemResult,
   type BatchDryRunResult,
   type ContractEventSubscriptionHandle,
@@ -872,11 +895,14 @@ export {
   type ContractLogKindResolver,
   type ContractStorageReadResult,
   type ContractStorageTarget,
+  type DecodeAirgapTxEnvelopeOptions,
   type DecodedContractEvent,
   type DecodedContractLog,
   type DecodedContractLogByKind,
   type DecodedSignedCallTransaction,
   type DecodeSignedCallTransactionOptions,
+  type DecodedSignedTransactionAuto,
+  type DecodeSignedTransactionAutoOptions,
   type DecodedSignedTransferTransaction,
   type DecodeSignedTransferTransactionOptions,
   type DecodedTransactionReceiptLog,
@@ -887,6 +913,8 @@ export {
   type DryRunCallClient,
   type DryRunCallOptions,
   type DryRunCallResult,
+  type EncodeAirgapTxEnvelopeInput,
+  type EncodedAirgapTxEnvelope,
   type EscrowCreateParams,
   type EstimateAndBuildCallClient,
   type EstimateAndBuildCallOptions,
@@ -2879,6 +2907,97 @@ export function inspectRawSignedTransferTx(
     wireHashHex: decoded.wireHashHex,
     chainId: decoded.chainId.toString(),
     wireSizeBytes: decoded.wireSizeBytes,
+    signatureValid,
+  };
+}
+
+export interface InspectAnySignedTxOptions {
+  /**
+   * Optional Chain ID used when recomputing the domain-tagged BLAKE3 signing hash.
+   * Defaults to `CHAIN_IDS.MAINNET` (`1`) when omitted.
+   */
+  chainId?: bigint | number;
+  /**
+   * Optional 32-byte Ed25519 signer public key hex (with or without `0x` prefix).
+   * When omitted or blank, verifies against the transaction's embedded `senderBytes`.
+   */
+  publicKeyHex?: string;
+}
+
+export type InspectedSignedTransferTxAuto = InspectedSignedTransferTx & {
+  kind: "transfer";
+  variant: 0;
+};
+
+export type InspectedSignedCallTxAuto = InspectedSignedCallTx & {
+  kind: "call";
+  variant: 6;
+};
+
+export type InspectedSignedTxAuto =
+  | InspectedSignedTransferTxAuto
+  | InspectedSignedCallTxAuto;
+
+/**
+ * Automatically detects the transaction variant (`transfer` or `call`) via
+ * `decodeSignedTransactionAuto`, verifies its Ed25519 signature via
+ * `verifySignedTransactionAuto`, and returns a JSON-safe discriminated summary
+ * (with all `bigint` fields serialized as decimal strings).
+ */
+export function inspectAnySignedTx(
+  rawTxHex: string,
+  options?: InspectAnySignedTxOptions,
+): InspectedSignedTxAuto {
+  const normalizedChainId = normalizeOptionalChainId(options?.chainId);
+  const overridePubKey = parseOptionalPublicKeyHex(options?.publicKeyHex);
+
+  const decoded = decodeSignedTransactionAuto(
+    rawTxHex.trim(),
+    normalizedChainId !== undefined ? { chainId: normalizedChainId } : undefined,
+  );
+  const signatureValid = verifySignedTransactionAuto(decoded, overridePubKey);
+
+  if (decoded.kind === "transfer") {
+    const tx = decoded.tx;
+    return {
+      kind: "transfer",
+      variant: 0,
+      senderHex: tx.senderHex,
+      senderAddress: tx.senderAddress,
+      recipientHex: tx.recipientHex,
+      recipientAddress: tx.recipientAddress,
+      nonce: tx.nonce.toString(),
+      amount: tx.amount.toString(),
+      fee: tx.fee.toString(),
+      signatureHex: tx.signatureHex,
+      signingHashHex: tx.signingHashHex,
+      wireHashHex: tx.wireHashHex,
+      chainId: tx.chainId.toString(),
+      wireSizeBytes: tx.wireSizeBytes,
+      signatureValid,
+    };
+  }
+
+  const tx = decoded.tx;
+  return {
+    kind: "call",
+    variant: 6,
+    senderHex: tx.senderHex,
+    senderAddress: tx.senderAddress,
+    nonce: tx.nonce.toString(),
+    fee: tx.fee.toString(),
+    contractHex: tx.contractHex,
+    contractAddress: tx.contractAddress,
+    method: tx.method,
+    callValue: tx.callValue.toString(),
+    argsHex: tx.argsHex,
+    argsByteLength: tx.args.length,
+    gasLimit: tx.gasLimit.toString(),
+    signatureHex: tx.signatureHex,
+    signingHashHex: tx.signingHashHex,
+    wireHashHex: tx.wireHashHex,
+    chainId: tx.chainId,
+    wireSizeBytes: tx.wireSizeBytes,
     signatureValid,
   };
 }

@@ -5,6 +5,7 @@ import {
   KOVANICA_COIN_TYPE,
 } from "kovanica-sdk";
 import {
+  AIRGAP_ENVELOPE_PREFIX,
   buildEscrowCreateCall,
   buildHtlcCreateCall,
   buildNameRegisterCall,
@@ -14,11 +15,13 @@ import {
   buildTokenTransferCall,
   buildVaultCreateCall,
   bytesToHex,
+  decodeAirgapTxEnvelope,
   decodeContractStateHex,
   DEFAULT_JSONRPC_READ_BATCH_PRESET,
   DEFAULT_LOG_HISTORY_CHUNK_SIZE,
   deriveAccountsFromMnemonic,
   deriveContractStorageSlotHex,
+  encodeAirgapTxEnvelope,
   estimateContractCall,
   estimateContractCallBatch,
   executeJsonRpcReadBatch,
@@ -27,6 +30,7 @@ import {
   generateMnemonic,
   hexToBytes,
   inspectAddress,
+  inspectAnySignedTx,
   inspectRawSignedCallTx,
   inspectRawSignedTransferTx,
   KovanicaDecodeError,
@@ -41,14 +45,18 @@ import {
   signAndSerializeTransaction,
   validateMnemonic,
   type AddressInspectionResult,
+  type AirgapTxEnvelope,
+  type AirgapTxKind,
   type CallTxKind,
   type ContractDecoderKind,
   type ContractLogHistoryQueryResult,
   type ContractLogKind,
   type DerivedAccountInfo,
+  type EncodedAirgapTxEnvelope,
   type FailoverRpcProbeResult,
   type InspectedSignedCallTx,
   type InspectedSignedTransferTx,
+  type InspectedSignedTxAuto,
   type JsonRpcBatchRequestItem,
   type JsonRpcReadBatchSummary,
   type NodeCapabilityProbeSummary,
@@ -248,6 +256,26 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
   const [inspectedTransferTx, setInspectedTransferTx] =
     useState<InspectedSignedTransferTx | null>(null);
   const [transferTxInspectError, setTransferTxInspectError] = useState<string | null>(null);
+
+  // Universal Tx Auto-Decoder & Air-Gap Envelope Studio state
+  const [universalTxHexInput, setUniversalTxHexInput] = useState<string>("");
+  const [universalTxChainIdStr, setUniversalTxChainIdStr] = useState<string>(() =>
+    String(selectedChainId),
+  );
+  const [universalTxPubkeyHex, setUniversalTxPubkeyHex] = useState<string>("");
+  const [inspectedUniversalTx, setInspectedUniversalTx] =
+    useState<InspectedSignedTxAuto | null>(null);
+  const [universalTxError, setUniversalTxError] = useState<string | null>(null);
+
+  const [wrappedEnvelopeResult, setWrappedEnvelopeResult] =
+    useState<EncodedAirgapTxEnvelope | null>(null);
+  const [airgapEnvelopeInput, setAirgapEnvelopeInput] = useState<string>("");
+  const [airgapExpectedChainStr, setAirgapExpectedChainStr] = useState<string>("");
+  const [decodedAirgapResult, setDecodedAirgapResult] = useState<{
+    envelope: AirgapTxEnvelope;
+    inspectedTx: InspectedSignedTxAuto | null;
+  } | null>(null);
+  const [airgapDecodeError, setAirgapDecodeError] = useState<string | null>(null);
 
   // Self-test results
   const [selfTestSteps, setSelfTestSteps] = useState<SelfTestStep[] | null>(null);
@@ -3277,6 +3305,385 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
                 className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto max-h-72"
               >
                 {JSON.stringify(inspectedTransferTx, null, 2)}
+              </pre>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Universal Tx Auto-Decoder & Air-Gap Envelope Studio Panel */}
+      <div
+        className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-5"
+        data-testid="universal-tx-airgap-panel"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
+          <div>
+            <h2 className="text-sm font-semibold text-fg">
+              Universal Tx Auto-Decoder &amp; Air-Gap Envelope Studio
+            </h2>
+            <p className="text-xs text-muted">
+              Auto-decode any signed Transfer or Wasmi Call raw hex, wrap into a{" "}
+              <code className="font-mono text-gold">{AIRGAP_ENVELOPE_PREFIX}...</code> air-gap
+              envelope, and verify pasted envelopes offline
+            </p>
+          </div>
+          <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-surface-2 border border-border text-gold">
+            Auto-Decode + kvnc-tx:v1
+          </span>
+        </div>
+
+        {/* Auto-Decode & Wrap into Air-Gap Envelope */}
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-xs font-semibold text-muted uppercase tracking-wider">
+              Auto-Decode Any Signed Tx &amp; Wrap Air-Gap Envelope
+            </h3>
+            {signedResult?.rawTxHex && (
+              <button
+                type="button"
+                data-testid="load-last-signed-universal-btn"
+                onClick={() => {
+                  setUniversalTxHexInput(signedResult.rawTxHex);
+                  setUniversalTxChainIdStr(String(selectedChainId));
+                  setUniversalTxError(null);
+                }}
+                className="px-2.5 py-1 text-xs bg-surface-2 hover:bg-border rounded border border-border text-muted hover:text-fg transition-colors"
+              >
+                Load Last Signed Tx
+              </button>
+            )}
+          </div>
+
+          <textarea
+            id="universal-tx-hex-input"
+            data-testid="universal-tx-hex-input"
+            rows={3}
+            value={universalTxHexInput}
+            onChange={(e) => setUniversalTxHexInput(e.target.value)}
+            placeholder="Paste any raw signed Transfer (variant 0) or Wasmi Call (variant 6) hex..."
+            className="w-full bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+          />
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+            <div>
+              <label
+                htmlFor="universal-tx-chain-id-input"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                Chain ID (for sighash &amp; envelope)
+              </label>
+              <input
+                id="universal-tx-chain-id-input"
+                data-testid="universal-tx-chain-id-input"
+                type="number"
+                min={0}
+                value={universalTxChainIdStr}
+                onChange={(e) => setUniversalTxChainIdStr(e.target.value)}
+                placeholder={String(selectedChainId)}
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+
+            <div className="md:col-span-2">
+              <label
+                htmlFor="universal-tx-pubkey-input"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                Signer Public Key Hex Override (optional)
+              </label>
+              <input
+                id="universal-tx-pubkey-input"
+                data-testid="universal-tx-pubkey-input"
+                type="text"
+                value={universalTxPubkeyHex}
+                onChange={(e) => setUniversalTxPubkeyHex(e.target.value)}
+                placeholder="64-char hex pubkey (optional)"
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              data-testid="universal-auto-decode-btn"
+              onClick={() => {
+                setUniversalTxError(null);
+                setInspectedUniversalTx(null);
+                try {
+                  const trimmedChain = universalTxChainIdStr.trim();
+                  const parsedChainId =
+                    trimmedChain.length > 0 ? BigInt(trimmedChain) : BigInt(selectedChainId);
+                  const inspected = inspectAnySignedTx(universalTxHexInput, {
+                    chainId: parsedChainId,
+                    publicKeyHex: universalTxPubkeyHex.trim() || undefined,
+                  });
+                  setInspectedUniversalTx(inspected);
+                } catch (err: unknown) {
+                  if (err instanceof KovanicaDecodeError) {
+                    setUniversalTxError(`[${err.code}] ${err.message}`);
+                  } else {
+                    setUniversalTxError(err instanceof Error ? err.message : String(err));
+                  }
+                }
+              }}
+              className="px-4 py-2 bg-gold hover:bg-gold/90 text-bg rounded-lg text-xs font-semibold transition-colors"
+            >
+              Auto-Decode &amp; Verify
+            </button>
+
+            <button
+              type="button"
+              data-testid="wrap-airgap-envelope-btn"
+              onClick={() => {
+                setUniversalTxError(null);
+                setWrappedEnvelopeResult(null);
+                try {
+                  const trimmedChain = universalTxChainIdStr.trim();
+                  const chainIdNum =
+                    trimmedChain.length > 0 ? Number(trimmedChain) : selectedChainId;
+                  let kind: AirgapTxKind = "raw";
+                  let signingHashHex: string | undefined;
+                  try {
+                    const inspected = inspectAnySignedTx(universalTxHexInput, {
+                      chainId: chainIdNum,
+                      publicKeyHex: universalTxPubkeyHex.trim() || undefined,
+                    });
+                    kind = inspected.kind;
+                    signingHashHex = inspected.signingHashHex;
+                    setInspectedUniversalTx(inspected);
+                  } catch {
+                    // Fall back to kind: "raw" when wrapping non-standard raw hex
+                  }
+                  const wrapped = encodeAirgapTxEnvelope({
+                    chainId: chainIdNum,
+                    kind,
+                    rawTxHex: universalTxHexInput.trim(),
+                    ...(signingHashHex ? { signingHashHex } : {}),
+                  });
+                  setWrappedEnvelopeResult(wrapped);
+                  setAirgapEnvelopeInput(wrapped.encoded);
+                } catch (err: unknown) {
+                  if (err instanceof KovanicaDecodeError) {
+                    setUniversalTxError(`[${err.code}] ${err.message}`);
+                  } else {
+                    setUniversalTxError(err instanceof Error ? err.message : String(err));
+                  }
+                }
+              }}
+              className="px-4 py-2 bg-gold/20 hover:bg-gold/30 rounded-lg border border-gold/40 text-gold text-xs font-semibold transition-colors"
+            >
+              Wrap as Air-Gap Envelope
+            </button>
+          </div>
+
+          {universalTxError && (
+            <div
+              data-testid="universal-tx-error"
+              className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3"
+            >
+              {universalTxError}
+            </div>
+          )}
+
+          {inspectedUniversalTx && (
+            <div data-testid="universal-tx-result" className="flex flex-col gap-2 text-xs">
+              <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1 text-muted">
+                <span>
+                  Kind:{" "}
+                  <strong data-testid="universal-tx-kind" className="text-gold uppercase">
+                    {inspectedUniversalTx.kind}
+                  </strong>{" "}
+                  (v{inspectedUniversalTx.variant})
+                </span>
+                <span>
+                  Signature:{" "}
+                  <strong
+                    data-testid="universal-tx-sig-status"
+                    className={
+                      inspectedUniversalTx.signatureValid ? "text-emerald-400" : "text-red-400"
+                    }
+                  >
+                    {inspectedUniversalTx.signatureValid ? "VALID" : "INVALID"}
+                  </strong>
+                </span>
+                <span>
+                  Nonce: <strong className="text-fg">{inspectedUniversalTx.nonce}</strong>
+                </span>
+                <span>
+                  Fee: <strong className="text-fg">{inspectedUniversalTx.fee}</strong>
+                </span>
+                <span>
+                  Size: <strong className="text-fg">{inspectedUniversalTx.wireSizeBytes}B</strong>
+                </span>
+              </div>
+              <pre
+                data-testid="universal-tx-json"
+                className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto max-h-64"
+              >
+                {JSON.stringify(inspectedUniversalTx, null, 2)}
+              </pre>
+            </div>
+          )}
+
+          {wrappedEnvelopeResult && (
+            <div data-testid="wrapped-airgap-result" className="flex flex-col gap-2 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2 bg-surface-2/80 border border-border rounded-lg p-3 font-mono text-muted">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                  <span>
+                    Chain: <strong className="text-fg">{wrappedEnvelopeResult.envelope.chainId}</strong>
+                  </span>
+                  <span>
+                    Tag:{" "}
+                    <strong className="text-gold">
+                      {wrappedEnvelopeResult.envelope.networkTag}
+                    </strong>
+                  </span>
+                  <span>
+                    Checksum:{" "}
+                    <strong className="text-emerald-400">
+                      {wrappedEnvelopeResult.envelope.checksumHex}
+                    </strong>
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => copyToClipboard(wrappedEnvelopeResult.encoded, "airgap-envelope")}
+                  className="px-2.5 py-1 text-xs bg-surface hover:bg-border rounded border border-border text-fg transition-colors"
+                >
+                  {copySuccess === "airgap-envelope" ? "Copied!" : "Copy Envelope"}
+                </button>
+              </div>
+              <pre
+                data-testid="wrapped-airgap-encoded"
+                className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg break-all whitespace-pre-wrap max-h-40 overflow-y-auto"
+              >
+                {wrappedEnvelopeResult.encoded}
+              </pre>
+            </div>
+          )}
+        </div>
+
+        {/* Decode & Verify Pasted Air-Gap Envelope */}
+        <div className="flex flex-col gap-3 border-t border-border pt-4">
+          <h3 className="text-xs font-semibold text-muted uppercase tracking-wider">
+            Decode &amp; Verify Pasted Air-Gap Envelope
+          </h3>
+
+          <textarea
+            id="airgap-envelope-input"
+            data-testid="airgap-envelope-input"
+            rows={3}
+            value={airgapEnvelopeInput}
+            onChange={(e) => setAirgapEnvelopeInput(e.target.value)}
+            placeholder={`Paste ${AIRGAP_ENVELOPE_PREFIX}<base64url> transport string or raw envelope JSON...`}
+            className="w-full bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+          />
+
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="w-48">
+              <label
+                htmlFor="airgap-expected-chain-input"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                Expected Chain ID (optional)
+              </label>
+              <input
+                id="airgap-expected-chain-input"
+                data-testid="airgap-expected-chain-input"
+                type="number"
+                min={0}
+                value={airgapExpectedChainStr}
+                onChange={(e) => setAirgapExpectedChainStr(e.target.value)}
+                placeholder="Any chain"
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+
+            <button
+              type="button"
+              data-testid="decode-airgap-envelope-btn"
+              onClick={() => {
+                setAirgapDecodeError(null);
+                setDecodedAirgapResult(null);
+                try {
+                  const trimmedExpected = airgapExpectedChainStr.trim();
+                  const expectedChainId =
+                    trimmedExpected.length > 0 ? Number(trimmedExpected) : undefined;
+                  const envelope = decodeAirgapTxEnvelope(airgapEnvelopeInput, {
+                    ...(expectedChainId !== undefined ? { expectedChainId } : {}),
+                  });
+                  let inspectedTx: InspectedSignedTxAuto | null = null;
+                  if (envelope.kind === "transfer" || envelope.kind === "call") {
+                    try {
+                      inspectedTx = inspectAnySignedTx(envelope.rawTxHex, {
+                        chainId: envelope.chainId,
+                      });
+                    } catch {
+                      inspectedTx = null;
+                    }
+                  }
+                  setDecodedAirgapResult({ envelope, inspectedTx });
+                } catch (err: unknown) {
+                  if (err instanceof KovanicaDecodeError) {
+                    setAirgapDecodeError(`[${err.code}] ${err.message}`);
+                  } else {
+                    setAirgapDecodeError(err instanceof Error ? err.message : String(err));
+                  }
+                }
+              }}
+              className="px-4 py-2 bg-gold/20 hover:bg-gold/30 rounded-lg border border-gold/40 text-gold text-xs font-semibold transition-colors"
+            >
+              Decode &amp; Verify Envelope
+            </button>
+          </div>
+
+          {airgapDecodeError && (
+            <div
+              data-testid="airgap-decode-error"
+              className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3"
+            >
+              {airgapDecodeError}
+            </div>
+          )}
+
+          {decodedAirgapResult && (
+            <div data-testid="airgap-decode-result" className="flex flex-col gap-2 text-xs">
+              <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1 text-muted">
+                <span>
+                  Checksum: <strong className="text-emerald-400">VERIFIED</strong> (
+                  {decodedAirgapResult.envelope.checksumHex})
+                </span>
+                <span>
+                  Kind:{" "}
+                  <strong className="text-gold uppercase">
+                    {decodedAirgapResult.envelope.kind}
+                  </strong>
+                </span>
+                <span>
+                  Chain: <strong className="text-fg">{decodedAirgapResult.envelope.chainId}</strong>{" "}
+                  ({decodedAirgapResult.envelope.networkTag})
+                </span>
+                {decodedAirgapResult.inspectedTx && (
+                  <span>
+                    Tx Signature:{" "}
+                    <strong
+                      className={
+                        decodedAirgapResult.inspectedTx.signatureValid
+                          ? "text-emerald-400"
+                          : "text-red-400"
+                      }
+                    >
+                      {decodedAirgapResult.inspectedTx.signatureValid ? "VALID" : "INVALID"}
+                    </strong>
+                  </span>
+                )}
+              </div>
+              <pre
+                data-testid="airgap-decode-json"
+                className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto max-h-64"
+              >
+                {JSON.stringify(decodedAirgapResult, null, 2)}
               </pre>
             </div>
           )}

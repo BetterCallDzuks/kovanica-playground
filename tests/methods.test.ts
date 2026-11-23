@@ -3,13 +3,18 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import {
+  AIRGAP_ENVELOPE_PREFIX,
+  AIRGAP_ENVELOPE_VERSION,
   applyFeeBuffer,
   CHAIN_IDS,
   computeTransferTransactionSigningHash,
   createFailoverClient,
+  decodeAirgapTxEnvelope,
   decodeSignedCallTransaction,
+  decodeSignedTransactionAuto,
   decodeSignedTransferTransaction,
   dryRunBatchCalls,
+  encodeAirgapTxEnvelope,
   EscrowClient,
   estimateTxFeeWithBuffer,
   FailoverHttpTransport,
@@ -21,6 +26,7 @@ import {
   NameRegistryClient,
   NftClient,
   normalizeAddressList,
+  peekTransactionVariant,
   probeRpcNode,
   readContractStorage,
   sanitizeRpcUrl,
@@ -30,17 +36,23 @@ import {
   VaultClient,
   verifyCallTransactionSignature,
   verifyEd25519,
+  verifySignedTransactionAuto,
   verifyTransferTransactionSignature,
   waitForTransactionFinality,
 } from "kovanica-sdk";
 import { ALLOWLISTED_METHODS, validateParam } from "../src/methods";
 import {
+  AIRGAP_ENVELOPE_PREFIX as interopAirgapEnvelopePrefix,
+  AIRGAP_ENVELOPE_VERSION as interopAirgapEnvelopeVersion,
   applyFeeBuffer as interopApplyFeeBuffer,
   computeTransferTransactionSigningHash as interopComputeTransferTransactionSigningHash,
   createFailoverClient as interopCreateFailoverClient,
+  decodeAirgapTxEnvelope as interopDecodeAirgapTxEnvelope,
   decodeSignedCallTransaction as interopDecodeSignedCallTransaction,
+  decodeSignedTransactionAuto as interopDecodeSignedTransactionAuto,
   decodeSignedTransferTransaction as interopDecodeSignedTransferTransaction,
   dryRunBatchCalls as interopDryRunBatchCalls,
+  encodeAirgapTxEnvelope as interopEncodeAirgapTxEnvelope,
   EscrowClient as interopEscrowClient,
   estimateTxFeeWithBuffer as interopEstimateTxFeeWithBuffer,
   FailoverHttpTransport as interopFailoverHttpTransport,
@@ -52,6 +64,7 @@ import {
   NameRegistryClient as interopNameRegistryClient,
   NftClient as interopNftClient,
   normalizeAddressList as interopNormalizeAddressList,
+  peekTransactionVariant as interopPeekTransactionVariant,
   probeRpcNode as interopProbeRpcNode,
   readContractStorage as interopReadContractStorage,
   sanitizeRpcUrl as interopSanitizeRpcUrl,
@@ -61,6 +74,7 @@ import {
   VaultClient as interopVaultClient,
   verifyCallTransactionSignature as interopVerifyCallTransactionSignature,
   verifyEd25519 as interopVerifyEd25519,
+  verifySignedTransactionAuto as interopVerifySignedTransactionAuto,
   verifyTransferTransactionSignature as interopVerifyTransferTransactionSignature,
   waitForTransactionFinality as interopWaitForTransactionFinality,
 } from "../src/wallet-interop";
@@ -71,7 +85,7 @@ describe("Immutable SDK Pin & Traceability", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
     const pinnedSha = pkg?.kovanicaSdk?.testedRevision;
 
-    expect(pinnedSha).toBe("634e4aec5a12d628985a148181fadd38344b2864");
+    expect(pinnedSha).toBe("d4f7cb9aa15b0da84a1a7607894381cbdf29fd41");
     expect(pinnedSha).toMatch(/^[0-9a-f]{40}$/);
 
     const ciWorkflow = fs.readFileSync(path.join(rootDir, ".github/workflows/ci.yml"), "utf8");
@@ -124,6 +138,13 @@ describe("Immutable SDK Pin & Traceability", () => {
     expect(distContent).toContain("computeTransferTransactionSigningHash");
     expect(distContent).toContain("inspectAddress");
     expect(distContent).toContain("normalizeAddressList");
+    expect(distContent).toContain("peekTransactionVariant");
+    expect(distContent).toContain("decodeSignedTransactionAuto");
+    expect(distContent).toContain("verifySignedTransactionAuto");
+    expect(distContent).toContain("AIRGAP_ENVELOPE_PREFIX");
+    expect(distContent).toContain("AIRGAP_ENVELOPE_VERSION");
+    expect(distContent).toContain("encodeAirgapTxEnvelope");
+    expect(distContent).toContain("decodeAirgapTxEnvelope");
 
     expect(typeof readContractStorage).toBe("function");
     expect(typeof dryRunBatchCalls).toBe("function");
@@ -165,6 +186,20 @@ describe("Immutable SDK Pin & Traceability", () => {
     expect(interopComputeTransferTransactionSigningHash).toBe(computeTransferTransactionSigningHash);
     expect(interopInspectAddress).toBe(inspectAddress);
     expect(interopNormalizeAddressList).toBe(normalizeAddressList);
+    expect(typeof peekTransactionVariant).toBe("function");
+    expect(typeof decodeSignedTransactionAuto).toBe("function");
+    expect(typeof verifySignedTransactionAuto).toBe("function");
+    expect(typeof encodeAirgapTxEnvelope).toBe("function");
+    expect(typeof decodeAirgapTxEnvelope).toBe("function");
+    expect(AIRGAP_ENVELOPE_PREFIX).toBe("kvnc-tx:v1:");
+    expect(AIRGAP_ENVELOPE_VERSION).toBe(1);
+    expect(interopPeekTransactionVariant).toBe(peekTransactionVariant);
+    expect(interopDecodeSignedTransactionAuto).toBe(decodeSignedTransactionAuto);
+    expect(interopVerifySignedTransactionAuto).toBe(verifySignedTransactionAuto);
+    expect(interopAirgapEnvelopePrefix).toBe(AIRGAP_ENVELOPE_PREFIX);
+    expect(interopAirgapEnvelopeVersion).toBe(AIRGAP_ENVELOPE_VERSION);
+    expect(interopEncodeAirgapTxEnvelope).toBe(encodeAirgapTxEnvelope);
+    expect(interopDecodeAirgapTxEnvelope).toBe(decodeAirgapTxEnvelope);
 
     // Assert all 7 typed contract facades + MAX_JSONRPC_BATCH_SIZE are exported and re-exported identically
     expect(MAX_JSONRPC_BATCH_SIZE).toBe(32);
