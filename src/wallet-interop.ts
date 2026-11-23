@@ -20,6 +20,7 @@ import {
   deriveBip44,
   derivePrefixedStorageSlot,
   deriveStorageSlotHex,
+  dryRunBatchCalls,
   encodeAddress,
   estimateAndBuildCall,
   estimateBatchCalls,
@@ -28,23 +29,38 @@ import {
   getPublicKey,
   KOVANICA_COIN_TYPE,
   KovanicaDecodeError,
+  readContractStorage,
   TESTNET_ADDRESS_PREFIX,
   toHexQuantity,
   waitForTransactionReceipt,
+  type BatchDryRunItemResult,
+  type BatchDryRunResult,
   type ContractLogKind,
   type ContractLogKindResolver,
+  type ContractStorageReadResult,
+  type ContractStorageTarget,
   type DecodedContractLog,
   type DecodedContractLogByKind,
   type DecodedTransactionReceiptLog,
   type DecodedTransactionReceiptLogByKind,
+  type DefaultDecodedStorageByKind,
+  type DryRunBatchCallItem,
+  type DryRunBatchCallsOptions,
+  type DryRunCallClient,
+  type DryRunCallOptions,
+  type DryRunCallResult,
   type EstimateAndBuildCallClient,
   type EstimateAndBuildCallOptions,
   type EstimateBatchCallsOptions,
   type PreparedBatchCallTransactions,
   type PreparedCallTransaction,
+  type ReadContractStorageClient,
+  type ReadContractStorageOptions,
   type ReceiptLogEntry,
   type ReceiptWithLogs,
   type StorageSlotContract,
+  type StorageSlotKey,
+  type StorageSlotKind,
   type WaitForTransactionReceiptClient,
   type WaitForTransactionReceiptOptions,
 } from "kovanica-sdk";
@@ -731,25 +747,41 @@ export {
   decodeTransactionReceiptLogs,
   derivePrefixedStorageSlot,
   deriveStorageSlotHex,
+  dryRunBatchCalls,
   estimateAndBuildCall,
   estimateBatchCalls,
   estimateCallTxSize,
   KovanicaDecodeError,
+  readContractStorage,
   waitForTransactionReceipt,
+  type BatchDryRunItemResult,
+  type BatchDryRunResult,
   type ContractLogKind,
   type ContractLogKindResolver,
+  type ContractStorageReadResult,
+  type ContractStorageTarget,
   type DecodedContractLog,
   type DecodedContractLogByKind,
   type DecodedTransactionReceiptLog,
   type DecodedTransactionReceiptLogByKind,
+  type DefaultDecodedStorageByKind,
+  type DryRunBatchCallItem,
+  type DryRunBatchCallsOptions,
+  type DryRunCallClient,
+  type DryRunCallOptions,
+  type DryRunCallResult,
   type EstimateAndBuildCallClient,
   type EstimateAndBuildCallOptions,
   type EstimateBatchCallsOptions,
   type PreparedBatchCallTransactions,
   type PreparedCallTransaction,
+  type ReadContractStorageClient,
+  type ReadContractStorageOptions,
   type ReceiptLogEntry,
   type ReceiptWithLogs,
   type StorageSlotContract,
+  type StorageSlotKey,
+  type StorageSlotKind,
   type WaitForTransactionReceiptClient,
   type WaitForTransactionReceiptOptions,
 };
@@ -1649,5 +1681,301 @@ export async function pollAndDecodeTransactionReceipt(
     decodedLogs,
     decodeErrors,
   };
+}
+
+// --- Export / Import Contract Call Presets (Strict Schema & Bounds) ---
+
+export const CONTRACT_PRESETS_SCHEMA_VERSION = 1;
+export const MAX_CONTRACT_PRESETS_ITEMS = 64;
+export const MAX_CONTRACT_PRESETS_JSON_BYTES = 262_144; // 256 KiB
+const MAX_PRESET_ARGS_BYTES = 32_768; // 32 KiB per call
+const MAX_PRESET_METHOD_LENGTH = 128;
+const U64_MAX = 0xffffffffffffffffn;
+
+export interface SerializedContractCallPreset {
+  contractHex: string;
+  method: string;
+  argsHex: string;
+  value: string;
+  gasLimit: string;
+}
+
+export interface ContractPresetsExportBundle {
+  version: typeof CONTRACT_PRESETS_SCHEMA_VERSION;
+  presets: SerializedContractCallPreset[];
+}
+
+/**
+ * Serializes a list of Wasmi `CallTxKind` presets into a deterministic, versioned JSON bundle.
+ * Validates array bounds and each preset field fail-closed before serialization.
+ */
+export function exportContractPresetsJson(
+  presets: ReadonlyArray<CallTxKind>,
+): string {
+  if (!Array.isArray(presets)) {
+    throw new KovanicaDecodeError(
+      "INVALID_INPUT",
+      "Contract call presets must be an array",
+      { field: "presets" },
+    );
+  }
+  if (presets.length === 0) {
+    throw new KovanicaDecodeError(
+      "INVALID_INPUT",
+      "Cannot export an empty contract call presets list",
+      { field: "presets" },
+    );
+  }
+  if (presets.length > MAX_CONTRACT_PRESETS_ITEMS) {
+    throw new KovanicaDecodeError(
+      "INVALID_INPUT",
+      `Cannot export more than ${MAX_CONTRACT_PRESETS_ITEMS} call presets (got ${presets.length})`,
+      { field: "presets" },
+    );
+  }
+
+  const serialized: SerializedContractCallPreset[] = presets.map((preset, idx) => {
+    if (!preset || typeof preset !== "object" || preset.type !== "call") {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        `Preset at index ${idx} must be a valid CallTxKind`,
+        { field: `presets[${idx}]` },
+      );
+    }
+    if (!(preset.contract instanceof Uint8Array) || preset.contract.length !== 32) {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        `Preset at index ${idx} must have a 32-byte contract address`,
+        { field: `presets[${idx}].contract` },
+      );
+    }
+    const method = typeof preset.method === "string" ? preset.method.trim() : "";
+    if (method.length === 0 || method.length > MAX_PRESET_METHOD_LENGTH) {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        `Preset at index ${idx} method must be 1..${MAX_PRESET_METHOD_LENGTH} characters`,
+        { field: `presets[${idx}].method` },
+      );
+    }
+    if (!(preset.args instanceof Uint8Array) || preset.args.length > MAX_PRESET_ARGS_BYTES) {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        `Preset at index ${idx} args must be a Uint8Array <= ${MAX_PRESET_ARGS_BYTES} bytes`,
+        { field: `presets[${idx}].args` },
+      );
+    }
+    if (typeof preset.value !== "bigint" || preset.value < 0n || preset.value > U64_MAX) {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        `Preset at index ${idx} value must be a u64 bigint`,
+        { field: `presets[${idx}].value` },
+      );
+    }
+    if (typeof preset.gasLimit !== "bigint" || preset.gasLimit <= 0n || preset.gasLimit > U64_MAX) {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        `Preset at index ${idx} gasLimit must be a positive u64 bigint`,
+        { field: `presets[${idx}].gasLimit` },
+      );
+    }
+
+    return {
+      contractHex: bytesToHex(preset.contract),
+      method,
+      argsHex: bytesToHex(preset.args),
+      value: preset.value.toString(),
+      gasLimit: preset.gasLimit.toString(),
+    };
+  });
+
+  const bundle: ContractPresetsExportBundle = {
+    version: CONTRACT_PRESETS_SCHEMA_VERSION,
+    presets: serialized,
+  };
+  return JSON.stringify(bundle, null, 2);
+}
+
+/**
+ * Parses and strictly validates an imported JSON contract call presets bundle,
+ * enforcing byte-size, schema version, max-items, hex, and u64 integer bounds.
+ */
+export function parseImportedContractPresetsJson(rawJson: string): CallTxKind[] {
+  if (typeof rawJson !== "string" || rawJson.trim().length === 0) {
+    throw new KovanicaDecodeError(
+      "INVALID_INPUT",
+      "Presets JSON input must be a non-empty string",
+      { field: "rawJson" },
+    );
+  }
+
+  const byteLen = new TextEncoder().encode(rawJson).length;
+  if (byteLen > MAX_CONTRACT_PRESETS_JSON_BYTES) {
+    throw new KovanicaDecodeError(
+      "INVALID_INPUT",
+      `Presets JSON payload exceeds maximum allowed size of ${MAX_CONTRACT_PRESETS_JSON_BYTES} bytes (got ${byteLen})`,
+      { field: "rawJson" },
+    );
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawJson);
+  } catch (err: unknown) {
+    throw new KovanicaDecodeError(
+      "INVALID_INPUT",
+      `Malformed presets JSON: ${err instanceof Error ? err.message : String(err)}`,
+      { field: "rawJson" },
+    );
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new KovanicaDecodeError(
+      "INVALID_INPUT",
+      "Presets JSON root must be an object with { version: 1, presets: [...] }",
+      { field: "root" },
+    );
+  }
+
+  const root = parsed as Record<string, unknown>;
+  if (root.version !== CONTRACT_PRESETS_SCHEMA_VERSION) {
+    throw new KovanicaDecodeError(
+      "INVALID_INPUT",
+      `Unsupported presets schema version: expected ${CONTRACT_PRESETS_SCHEMA_VERSION}, got ${String(root.version)}`,
+      { field: "version" },
+    );
+  }
+
+  if (!Array.isArray(root.presets)) {
+    throw new KovanicaDecodeError(
+      "INVALID_INPUT",
+      "Presets JSON must contain a presets array",
+      { field: "presets" },
+    );
+  }
+
+  if (root.presets.length === 0) {
+    throw new KovanicaDecodeError(
+      "INVALID_INPUT",
+      "Presets JSON contains no contract call presets",
+      { field: "presets" },
+    );
+  }
+
+  if (root.presets.length > MAX_CONTRACT_PRESETS_ITEMS) {
+    throw new KovanicaDecodeError(
+      "INVALID_INPUT",
+      `Presets JSON exceeds maximum allowed count of ${MAX_CONTRACT_PRESETS_ITEMS} items (got ${root.presets.length})`,
+      { field: "presets" },
+    );
+  }
+
+  return root.presets.map((entry, idx): CallTxKind => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        `Preset at index ${idx} must be an object`,
+        { field: `presets[${idx}]` },
+      );
+    }
+
+    const item = entry as Record<string, unknown>;
+
+    if (typeof item.contractHex !== "string") {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        `Preset at index ${idx} is missing string contractHex`,
+        { field: `presets[${idx}].contractHex` },
+      );
+    }
+    const cleanContractHex = item.contractHex.trim().replace(/^0x/i, "");
+    if (!/^[0-9a-fA-F]{64}$/.test(cleanContractHex)) {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        `Preset at index ${idx} contractHex must be a 32-byte (64-char) hex string`,
+        { field: `presets[${idx}].contractHex` },
+      );
+    }
+
+    if (typeof item.method !== "string") {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        `Preset at index ${idx} is missing string method`,
+        { field: `presets[${idx}].method` },
+      );
+    }
+    const method = item.method.trim();
+    if (
+      method.length === 0 ||
+      method.length > MAX_PRESET_METHOD_LENGTH ||
+      !/^[\x20-\x7e]+$/.test(method)
+    ) {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        `Preset at index ${idx} method must be 1..${MAX_PRESET_METHOD_LENGTH} printable ASCII characters`,
+        { field: `presets[${idx}].method` },
+      );
+    }
+
+    if (typeof item.argsHex !== "string") {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        `Preset at index ${idx} is missing string argsHex`,
+        { field: `presets[${idx}].argsHex` },
+      );
+    }
+    const cleanArgsHex = item.argsHex.trim().replace(/^0x/i, "");
+    if (
+      cleanArgsHex.length % 2 !== 0 ||
+      cleanArgsHex.length / 2 > MAX_PRESET_ARGS_BYTES ||
+      (cleanArgsHex.length > 0 && !/^[0-9a-fA-F]+$/.test(cleanArgsHex))
+    ) {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        `Preset at index ${idx} argsHex must be valid even-length hex <= ${MAX_PRESET_ARGS_BYTES} bytes`,
+        { field: `presets[${idx}].argsHex` },
+      );
+    }
+
+    if (typeof item.value !== "string" || !/^(0|[1-9][0-9]*)$/.test(item.value.trim())) {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        `Preset at index ${idx} value must be a non-negative decimal integer string`,
+        { field: `presets[${idx}].value` },
+      );
+    }
+    const value = BigInt(item.value.trim());
+    if (value < 0n || value > U64_MAX) {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        `Preset at index ${idx} value exceeds u64 range`,
+        { field: `presets[${idx}].value` },
+      );
+    }
+
+    if (typeof item.gasLimit !== "string" || !/^[1-9][0-9]*$/.test(item.gasLimit.trim())) {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        `Preset at index ${idx} gasLimit must be a positive decimal integer string`,
+        { field: `presets[${idx}].gasLimit` },
+      );
+    }
+    const gasLimit = BigInt(item.gasLimit.trim());
+    if (gasLimit <= 0n || gasLimit > U64_MAX) {
+      throw new KovanicaDecodeError(
+        "INVALID_INPUT",
+        `Preset at index ${idx} gasLimit exceeds u64 range`,
+        { field: `presets[${idx}].gasLimit` },
+      );
+    }
+
+    return {
+      type: "call",
+      contract: hexToBytes(cleanContractHex),
+      value,
+      method,
+      args: hexToBytes(cleanArgsHex),
+      gasLimit,
+    };
+  });
 }
 

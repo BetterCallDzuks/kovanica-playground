@@ -60,14 +60,27 @@ if (!existsSync(join(PLAYGROUND_ROOT, "node_modules"))) {
   process.exit(0);
 }
 
-// 3. If ../kovanica-sdk is at the exact pinned SHA, ensure its dist/ is built
+// 3. If ../kovanica-sdk is at the exact pinned SHA or includes it as an ancestor
+//    (for local dev with a newer sibling SDK on main), ensure its dist/ is built
 const markerPath = join(INSTALLED_SDK_DIR, ".tested-revision");
 const installedIsSymlink = existsSync(INSTALLED_SDK_DIR) && lstatSync(INSTALLED_SDK_DIR).isSymbolicLink();
 
-if (siblingHead === PINNED_SDK_SHA) {
+let siblingIncludesPinned = siblingHead === PINNED_SDK_SHA;
+if (!siblingIncludesPinned && siblingHead) {
+  try {
+    execSync(`git -C "${SIBLING_SDK_DIR}" merge-base --is-ancestor ${PINNED_SDK_SHA} HEAD`, {
+      stdio: "ignore",
+    });
+    siblingIncludesPinned = true;
+  } catch {
+    siblingIncludesPinned = false;
+  }
+}
+
+if (siblingIncludesPinned) {
   const siblingDist = join(SIBLING_SDK_DIR, "dist", "index.js");
   if (!existsSync(siblingDist)) {
-    console.log(`[prepare-sdk] Building sibling SDK at pinned SHA ${PINNED_SDK_SHA}...`);
+    console.log(`[prepare-sdk] Building sibling SDK at ${siblingHead}...`);
     execSync("npm ci", { cwd: SIBLING_SDK_DIR, stdio: "inherit", env: cleanEnv });
     execSync("npm run build", { cwd: SIBLING_SDK_DIR, stdio: "inherit", env: cleanEnv });
   }
@@ -77,7 +90,13 @@ if (siblingHead === PINNED_SDK_SHA) {
     }
     symlinkSync(SIBLING_SDK_DIR, INSTALLED_SDK_DIR, "dir");
   }
-  console.log(`[prepare-sdk] Verified SDK at pinned SHA ${PINNED_SDK_SHA}`);
+  if (siblingHead === PINNED_SDK_SHA) {
+    console.log(`[prepare-sdk] Verified SDK at pinned SHA ${PINNED_SDK_SHA}`);
+  } else {
+    console.log(
+      `[prepare-sdk] Verified sibling SDK at ${siblingHead} (includes pinned ancestor ${PINNED_SDK_SHA})`,
+    );
+  }
   process.exit(0);
 }
 

@@ -23,19 +23,25 @@ import {
   deriveContractStorageSlotHex,
   derivePrefixedStorageSlot,
   deriveStorageSlotHex,
+  dryRunBatchCalls,
   encodeBincodeBytes32Vec,
   encodeBincodeString,
   encodeBincodeStringVec,
   estimateBatchCalls,
   estimateContractCall,
   estimateContractCallBatch,
+  exportContractPresetsJson,
   fetchAndDecodeContractStorageSlot,
   formatAddressForChain,
   generateMnemonic,
   hexToBytes,
   isStorageSlotEmpty,
   KovanicaDecodeError,
+  MAX_CONTRACT_PRESETS_ITEMS,
+  MAX_CONTRACT_PRESETS_JSON_BYTES,
+  parseImportedContractPresetsJson,
   pollAndDecodeTransactionReceipt,
+  readContractStorage,
   runGoldenVectorSelfTest,
   signAndSerializeTransaction,
   u128le,
@@ -1166,6 +1172,234 @@ describe("Ecosystem HD Wallet & Wasmi Contract Interoperability (PRO-53, PRO-48)
         );
         expect(waitedReceipt.transactionHash).toBe(`0x${validTxHash}`);
         expect(waitedReceipt.success).toBe(true);
+      });
+    });
+
+    describe("SDK a2ec93f readContractStorage, dryRunBatchCalls, and Call Presets JSON Export/Import", () => {
+      it("reads and decodes canonical storage slots via re-exported readContractStorage", async () => {
+        const contractHex = "33".repeat(32);
+        const owner = hexToBytes("aa".repeat(32));
+        const pubkey = hexToBytes("bb".repeat(32));
+        const nameBytes = concat([
+          owner,
+          pubkey,
+          encodeBincodeStringVec(["https://relay1.kovanica.org"]),
+        ]);
+
+        const result = await readContractStorage(
+          {
+            getStorageAt: async (_addr, slot) => {
+              expect(slot).toBe(`0x${deriveStorageSlotHex("name", "alice")}`);
+              return `0x${bytesToHex(nameBytes)}`;
+            },
+          },
+          `0x${contractHex}`,
+          { kind: "name", key: "alice" },
+        );
+
+        expect(result.isEmpty).toBe(false);
+        expect(result.slotHex).toBe(`0x${deriveStorageSlotHex("name", "alice")}`);
+        expect(result.decoded?.ownerHex).toBe("aa".repeat(32));
+        expect(result.decoded?.pubkeyHex).toBe("bb".repeat(32));
+        expect(result.decoded?.relayEndpoints).toEqual(["https://relay1.kovanica.org"]);
+
+        const emptyResult = await readContractStorage(
+          {
+            getStorageAt: async () => "0x",
+          },
+          `0x${contractHex}`,
+          { kind: "name", key: "missing" },
+        );
+        expect(emptyResult.isEmpty).toBe(true);
+        expect(emptyResult.decoded).toBeUndefined();
+      });
+
+      it("simulates a batch of contract calls via re-exported dryRunBatchCalls (including continueOnError)", async () => {
+        const accounts = deriveAccountsFromMnemonic(goldenMnemonic, "", 2, CHAIN_IDS.TESTNET);
+        const contract = hexToBytes("44".repeat(32));
+        const call1 = buildTokenTransferCall(contract, accounts[1].publicKey, 100n);
+        const call2 = buildNameRegisterCallTx(
+          contract,
+          "alice",
+          accounts[1].publicKey,
+          ["https://relay1.kovanica.org"],
+        );
+
+        let rpcCalls = 0;
+        const batchRes = await dryRunBatchCalls(
+          {
+            call: async (_method, _params) => {
+              rpcCalls++;
+              if (rpcCalls === 1) {
+                return "0xdeadbeef" as any;
+              }
+              throw new Error("VM execution reverted");
+            },
+          },
+          [
+            {
+              contract: call1.contract,
+              method: call1.method,
+              args: call1.args,
+              call_value: call1.value,
+              gas_limit: call1.gasLimit,
+            },
+            {
+              contract: call2.contract,
+              method: call2.method,
+              args: call2.args,
+              call_value: call2.value,
+              gas_limit: call2.gasLimit,
+            },
+          ],
+          { continueOnError: true },
+        );
+
+        expect(batchRes.totalCalls).toBe(2);
+        expect(batchRes.passedCount).toBe(1);
+        expect(batchRes.failedCount).toBe(1);
+        expect(batchRes.results[0].ok).toBe(true);
+        if (batchRes.results[0].ok) {
+          expect(batchRes.results[0].result.rawHex).toBe("0xdeadbeef");
+        }
+        expect(batchRes.results[1].ok).toBe(false);
+        if (!batchRes.results[1].ok) {
+          expect(batchRes.results[1].error.message).toContain("VM execution reverted");
+        }
+      });
+
+      it("round-trips contract call presets via exportContractPresetsJson and parseImportedContractPresetsJson", () => {
+        const accounts = deriveAccountsFromMnemonic(goldenMnemonic, "", 2, CHAIN_IDS.TESTNET);
+        const contract = hexToBytes("33".repeat(32));
+
+        const call1 = buildTokenTransferCall(contract, accounts[1].publicKey, 250_000n, 120_000n);
+        const call2 = buildNameRegisterCallTx(
+          contract,
+          "alice",
+          accounts[1].publicKey,
+          ["https://relay1.kovanica.org"],
+          150_000n,
+        );
+
+        const exportedJson = exportContractPresetsJson([call1, call2]);
+        const imported = parseImportedContractPresetsJson(exportedJson);
+
+        expect(imported).toHaveLength(2);
+        expect(imported[0]).toEqual(call1);
+        expect(imported[1]).toEqual(call2);
+      });
+
+      it("rejects malformed, invalid-schema, and oversized presets JSON fail-closed", () => {
+        const contractHex = "33".repeat(32);
+
+        // Empty / non-JSON
+        expect(() => parseImportedContractPresetsJson("")).toThrow(KovanicaDecodeError);
+        expect(() => parseImportedContractPresetsJson("{not-json")).toThrow(KovanicaDecodeError);
+
+        // Wrong root type / wrong schema version / empty presets
+        expect(() => parseImportedContractPresetsJson("[]")).toThrow(KovanicaDecodeError);
+        expect(() =>
+          parseImportedContractPresetsJson(JSON.stringify({ version: 2, presets: [] })),
+        ).toThrow(KovanicaDecodeError);
+        expect(() =>
+          parseImportedContractPresetsJson(JSON.stringify({ version: 1, presets: [] })),
+        ).toThrow(KovanicaDecodeError);
+
+        // Invalid fields (bad contractHex, bad argsHex, non-positive gasLimit, negative value)
+        expect(() =>
+          parseImportedContractPresetsJson(
+            JSON.stringify({
+              version: 1,
+              presets: [
+                {
+                  contractHex: "1234",
+                  method: "token_transfer",
+                  argsHex: "",
+                  value: "0",
+                  gasLimit: "100000",
+                },
+              ],
+            }),
+          ),
+        ).toThrow(KovanicaDecodeError);
+
+        expect(() =>
+          parseImportedContractPresetsJson(
+            JSON.stringify({
+              version: 1,
+              presets: [
+                {
+                  contractHex,
+                  method: "token_transfer",
+                  argsHex: "abc", // odd length
+                  value: "0",
+                  gasLimit: "100000",
+                },
+              ],
+            }),
+          ),
+        ).toThrow(KovanicaDecodeError);
+
+        expect(() =>
+          parseImportedContractPresetsJson(
+            JSON.stringify({
+              version: 1,
+              presets: [
+                {
+                  contractHex,
+                  method: "token_transfer",
+                  argsHex: "",
+                  value: "-1",
+                  gasLimit: "100000",
+                },
+              ],
+            }),
+          ),
+        ).toThrow(KovanicaDecodeError);
+
+        expect(() =>
+          parseImportedContractPresetsJson(
+            JSON.stringify({
+              version: 1,
+              presets: [
+                {
+                  contractHex,
+                  method: "token_transfer",
+                  argsHex: "",
+                  value: "0",
+                  gasLimit: "0",
+                },
+              ],
+            }),
+          ),
+        ).toThrow(KovanicaDecodeError);
+
+        // Exceeds MAX_CONTRACT_PRESETS_ITEMS bound
+        const tooMany = Array.from({ length: MAX_CONTRACT_PRESETS_ITEMS + 1 }, () => ({
+          contractHex,
+          method: "token_transfer",
+          argsHex: "",
+          value: "0",
+          gasLimit: "100000",
+        }));
+        expect(() =>
+          parseImportedContractPresetsJson(JSON.stringify({ version: 1, presets: tooMany })),
+        ).toThrow(KovanicaDecodeError);
+
+        // Exceeds MAX_CONTRACT_PRESETS_JSON_BYTES bound
+        const oversizedJson = JSON.stringify({
+          version: 1,
+          presets: [
+            {
+              contractHex,
+              method: "token_transfer",
+              argsHex: "aa".repeat(MAX_CONTRACT_PRESETS_JSON_BYTES),
+              value: "0",
+              gasLimit: "100000",
+            },
+          ],
+        });
+        expect(() => parseImportedContractPresetsJson(oversizedJson)).toThrow(KovanicaDecodeError);
       });
     });
   });

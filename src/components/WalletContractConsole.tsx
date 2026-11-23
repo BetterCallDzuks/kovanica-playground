@@ -19,10 +19,12 @@ import {
   deriveContractStorageSlotHex,
   estimateContractCall,
   estimateContractCallBatch,
+  exportContractPresetsJson,
   fetchAndDecodeContractStorageSlot,
   generateMnemonic,
   hexToBytes,
   KovanicaDecodeError,
+  parseImportedContractPresetsJson,
   pollAndDecodeTransactionReceipt,
   runGoldenVectorSelfTest,
   signAndSerializeTransaction,
@@ -130,6 +132,10 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
     kind: "curl" | "sdk";
     code: string;
   } | null>(null);
+  const [showPresetsPanel, setShowPresetsPanel] = useState<boolean>(false);
+  const [presetsJsonInput, setPresetsJsonInput] = useState<string>("");
+  const [presetsStatusMsg, setPresetsStatusMsg] = useState<string | null>(null);
+  const [presetsErrorMsg, setPresetsErrorMsg] = useState<string | null>(null);
 
   // SDK v0.4.0 Contract State Bincode Decoder & Live Storage Slot Fetch state
   const [decoderKind, setDecoderKind] = useState<ContractDecoderKind>("name");
@@ -383,6 +389,46 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
       copyToClipboard(snippet, "sdk-snippet");
     } catch (err: any) {
       setErrorMsg(`Failed to generate SDK snippet: ${err?.message || String(err)}`);
+    }
+  };
+
+  const handleExportBatchPresets = () => {
+    setErrorMsg(null);
+    setPresetsErrorMsg(null);
+    setPresetsStatusMsg(null);
+    try {
+      const callsToExport = batchQueue.length > 0 ? batchQueue : [buildActiveCallKind()];
+      const json = exportContractPresetsJson(callsToExport);
+      setPresetsJsonInput(json);
+      setShowPresetsPanel(true);
+      copyToClipboard(json, "batch-presets");
+      setPresetsStatusMsg(
+        `Exported ${callsToExport.length} call preset${callsToExport.length === 1 ? "" : "s"} to JSON.`,
+      );
+    } catch (err: unknown) {
+      setPresetsErrorMsg(
+        err instanceof Error ? err.message : String(err),
+      );
+      setShowPresetsPanel(true);
+    }
+  };
+
+  const handleImportBatchPresets = () => {
+    setPresetsErrorMsg(null);
+    setPresetsStatusMsg(null);
+    try {
+      const imported = parseImportedContractPresetsJson(presetsJsonInput);
+      setBatchQueue(imported);
+      setBatchEstimateResult(null);
+      setPresetsStatusMsg(
+        `Imported ${imported.length} call preset${imported.length === 1 ? "" : "s"} into batch queue.`,
+      );
+    } catch (err: unknown) {
+      if (err instanceof KovanicaDecodeError) {
+        setPresetsErrorMsg(`[${err.code}] ${err.message}`);
+      } else {
+        setPresetsErrorMsg(err instanceof Error ? err.message : String(err));
+      }
     }
   };
 
@@ -1208,9 +1254,96 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
               >
                 {copySuccess === "sdk-snippet" ? "Copied SDK!" : "Copy SDK Snippet"}
               </button>
+
+              <button
+                type="button"
+                data-testid="export-batch-presets-btn"
+                onClick={handleExportBatchPresets}
+                disabled={!isMnemonicValid}
+                className="px-3.5 py-2.5 bg-surface-2 hover:bg-border text-fg font-medium rounded-lg text-xs border border-border transition-colors disabled:opacity-50"
+              >
+                {copySuccess === "batch-presets" ? "Exported JSON!" : "Export Batch Presets JSON"}
+              </button>
+
+              <button
+                type="button"
+                data-testid="toggle-import-presets-btn"
+                onClick={() => {
+                  setShowPresetsPanel((prev) => !prev);
+                  setPresetsErrorMsg(null);
+                }}
+                className="px-3.5 py-2.5 bg-surface-2 hover:bg-border text-fg font-medium rounded-lg text-xs border border-border transition-colors"
+              >
+                Import Presets JSON
+              </button>
             </>
           )}
         </div>
+
+        {showPresetsPanel && txType !== "transfer" && (
+          <div
+            data-testid="presets-json-panel"
+            className="bg-surface-2 border border-border rounded-lg p-3.5 flex flex-col gap-2.5 text-xs"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-semibold text-fg">
+                Batch Call Presets JSON (Export / Import)
+              </span>
+              <div className="flex items-center gap-3">
+                {presetsJsonInput.trim().length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => copyToClipboard(presetsJsonInput, "batch-presets")}
+                    className="text-gold hover:underline font-medium"
+                  >
+                    Copy JSON
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setShowPresetsPanel(false)}
+                  className="text-muted hover:text-fg"
+                >
+                  Hide
+                </button>
+              </div>
+            </div>
+            <textarea
+              data-testid="presets-json-input"
+              rows={5}
+              value={presetsJsonInput}
+              onChange={(e) => setPresetsJsonInput(e.target.value)}
+              placeholder='{"version": 1, "presets": [{"contractHex": "...", "method": "...", "argsHex": "...", "value": "0", "gasLimit": "100000"}]}'
+              className="w-full bg-surface border border-border/60 rounded p-2.5 font-mono text-[11px] text-fg focus:outline-none focus:border-gold"
+            />
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                data-testid="import-presets-apply-btn"
+                onClick={handleImportBatchPresets}
+                className="px-3.5 py-1.5 bg-gold/20 hover:bg-gold/30 text-gold font-semibold rounded border border-gold/40 transition-colors"
+              >
+                Load Presets into Batch
+              </button>
+            </div>
+            {presetsStatusMsg && (
+              <div
+                data-testid="presets-status-msg"
+                className="text-xs font-mono text-emerald-400"
+              >
+                {presetsStatusMsg}
+              </div>
+            )}
+            {presetsErrorMsg && (
+              <div
+                data-testid="presets-error-msg"
+                className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded p-2"
+              >
+                {presetsErrorMsg}
+              </div>
+            )}
+          </div>
+        )}
 
         {activeCodeSnippet && txType !== "transfer" && (
           <div
