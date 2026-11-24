@@ -5,6 +5,7 @@ import {
   KOVANICA_COIN_TYPE,
 } from "kovanica-sdk";
 import { AccountHistoryWatchOnlyPanel } from "./AccountHistoryWatchOnlyPanel";
+import { FeeTiersMultisigPanel } from "./FeeTiersMultisigPanel";
 import { StorageSlotStudioPanel } from "./StorageSlotStudioPanel";
 import {
   AIRGAP_ENVELOPE_PREFIX,
@@ -3812,6 +3813,13 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
 
       {/* Account History & Watch-Only Inspector */}
       <AccountHistoryWatchOnlyPanel
+        client={client}
+        selectedChainId={selectedChainId}
+        defaultAddress={activeAccount?.address}
+      />
+
+      {/* Fee Tiers & Multisig Quorum */}
+      <FeeTiersMultisigPanel
         client={client}
         selectedChainId={selectedChainId}
         defaultAddress={activeAccount?.address}
