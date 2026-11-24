@@ -631,7 +631,7 @@ export default function App() {
 
         {/* WebSocket Event Stream Console */}
         <div className={mainTab === "ws" ? "block" : "hidden"}>
-          <WsSubscriptionConsole rpcUrl={rpcUrl} />
+          <WsSubscriptionConsole rpcUrl={rpcUrl} rpcClient={client} />
         </div>
 
         {/* Multi-Column Layout (RPC Explorer & Node Diagnostics) */}
