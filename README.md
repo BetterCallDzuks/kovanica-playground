@@ -52,23 +52,24 @@ Kovanica Playground reflects the established Kovanica design system:
    - **Address Inspector & Transfer Tx Verifier:** Chain-aware PRO-21 / legacy address validation (`inspectAddress`) plus offline native Transfer transaction decoding and signature verification (`decodeSignedTransferTransaction`, `verifyTransferTransactionSignature`).
    - **Universal Tx Auto-Decoder & Air-Gap Envelope Studio:** Automatic Transfer/Call variant detection (`peekTransactionVariant`, `decodeSignedTransactionAuto`, `verifySignedTransactionAuto`) and `kvnc-tx:v1:` BLAKE3-checksummed air-gap envelope wrapping and verification.
    - **Mempool Fee-Tier Estimator (`kovanica_mempoolStats`):** Live `economy`, `standard`, and `priority` fee-per-byte recommendations powered by `kovanica-sdk v0.6.0` (`parseMempoolFeeStats`, `computeFeeRecommendations`) with graceful legacy `kovanica_estimateFee` fallback.
+   - **Priority Fee Tier Lab & Air-Gapped Multisig Quorum Inspector:** Live `slow` / `standard` / `fast` fee tier estimation (`estimatePriorityFeeTiers`), lossless Replace-By-Fee bump calculations (`computeRbfFeeBump` at `+15%`, `+25%`, `+50%`), and read-only `kovanica-multisig-bundle-v1` quorum inspection (`encodeMultisigProposalBundle`, `decodeMultisigProposalBundle`, `checkMultisigQuorum`) with zero secret handling.
 
 ---
 
 ## Tested SDK Revision & Immutable Resolution
 
-`kovanica-playground` consumes `kovanica-sdk` at the pinned, immutable git revision [`d1fe6ae481c8df8bb1734f8ac9c7085c8a4216d3`](https://github.com/BetterCallDzuks/kovanica-sdk/commit/d1fe6ae481c8df8bb1734f8ac9c7085c8a4216d3):
+`kovanica-playground` consumes `kovanica-sdk` at the pinned, immutable git revision [`3ad6dc6e50a9aa95fab51c627a29f9fa108e9f2b`](https://github.com/BetterCallDzuks/kovanica-sdk/commit/3ad6dc6e50a9aa95fab51c627a29f9fa108e9f2b):
 
-- **Manifest Metadata (`package.json`):** Recorded in `kovanicaSdk.testedRevision` (`d1fe6ae481c8df8bb1734f8ac9c7085c8a4216d3`) and linked via `"kovanica-sdk": "file:../kovanica-sdk"` in `package.json` and `package-lock.json`.
-- **Automated Verification (`scripts/prepare-sdk.mjs`):** Running `npm run prepare:sdk` (also invoked automatically during `npm run build`) verifies that `../kovanica-sdk` exists, is checked out at the exact pinned 40-character SHA `d1fe6ae481c8df8bb1734f8ac9c7085c8a4216d3` (never following a moving `main`), and has compiled `dist/index.js`. If `../kovanica-sdk` is on a different branch or dirty, it materializes the pinned revision into `node_modules/kovanica-sdk` from an isolated worktree without modifying the sibling checkout.
-- **CI Enforcement (`.github/workflows/ci.yml` & `tests/methods.test.ts`):** GitHub Actions explicitly checks out `BetterCallDzuks/kovanica-sdk` at `ref: d1fe6ae481c8df8bb1734f8ac9c7085c8a4216d3`, and unit tests assert that `package.json`, `.github/workflows/ci.yml`, and the resolved `node_modules/kovanica-sdk` match this SHA.
+- **Manifest Metadata (`package.json`):** Recorded in `kovanicaSdk.testedRevision` (`3ad6dc6e50a9aa95fab51c627a29f9fa108e9f2b`) and linked via `"kovanica-sdk": "file:../kovanica-sdk"` in `package.json` and `package-lock.json`.
+- **Automated Verification (`scripts/prepare-sdk.mjs`):** Running `npm run prepare:sdk` (also invoked automatically during `npm run build`) verifies that `../kovanica-sdk` exists, is checked out at the exact pinned 40-character SHA `3ad6dc6e50a9aa95fab51c627a29f9fa108e9f2b` (never following a moving `main`), and has compiled `dist/index.js`. If `../kovanica-sdk` is on a different branch or dirty, it materializes the pinned revision into `node_modules/kovanica-sdk` from an isolated worktree without modifying the sibling checkout.
+- **CI Enforcement (`.github/workflows/ci.yml` & `tests/methods.test.ts`):** GitHub Actions explicitly checks out `BetterCallDzuks/kovanica-sdk` at `ref: 3ad6dc6e50a9aa95fab51c627a29f9fa108e9f2b`, and unit tests assert that `package.json`, `.github/workflows/ci.yml`, and the resolved `node_modules/kovanica-sdk` match this SHA.
 
 ---
 
 ## Local Integration & Build Workflow
 
 ```bash
-# 1. Verify/clone and build ../kovanica-sdk at pinned SHA d1fe6ae481c8df8bb1734f8ac9c7085c8a4216d3
+# 1. Verify/clone and build ../kovanica-sdk at pinned SHA 3ad6dc6e50a9aa95fab51c627a29f9fa108e9f2b
 npm run prepare:sdk
 
 # 2. Install playground dependencies cleanly from lockfile
@@ -142,7 +143,7 @@ In CI or isolated environments, the SDK is checked out at the exact pinned revis
 ```bash
 git clone https://github.com/BetterCallDzuks/kovanica-sdk.git
 cd kovanica-sdk
-git checkout d1fe6ae481c8df8bb1734f8ac9c7085c8a4216d3
+git checkout 3ad6dc6e50a9aa95fab51c627a29f9fa108e9f2b
 npm ci
 npm run build
 

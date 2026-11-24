@@ -7,11 +7,14 @@ import {
   AIRGAP_ENVELOPE_VERSION,
   applyFeeBuffer,
   CHAIN_IDS,
+  checkMultisigQuorum,
   computeFeeRecommendations,
+  computeRbfFeeBump,
   computeTransferTransactionSigningHash,
   createFailoverClient,
   createWatchOnlyAccount,
   decodeAirgapTxEnvelope,
+  decodeMultisigProposalBundle,
   decodeSignedCallTransaction,
   decodeSignedTransactionAuto,
   decodeSignedTransferTransaction,
@@ -22,7 +25,9 @@ import {
   deriveStorageSlotHex,
   dryRunBatchCalls,
   encodeAirgapTxEnvelope,
+  encodeMultisigProposalBundle,
   EscrowClient,
+  estimatePriorityFeeTiers,
   estimateTxFeeWithBuffer,
   FailoverHttpTransport,
   getAccountTxHistory,
@@ -31,6 +36,8 @@ import {
   inspectAddress,
   MAX_ACCOUNT_TX_HISTORY_LIMIT,
   MAX_JSONRPC_BATCH_SIZE,
+  MULTISIG_BUNDLE_FORMAT,
+  MULTISIG_BUNDLE_VERSION,
   MultisigClient,
   NameRegistryClient,
   NftClient,
@@ -59,11 +66,14 @@ import {
   AIRGAP_ENVELOPE_PREFIX as interopAirgapEnvelopePrefix,
   AIRGAP_ENVELOPE_VERSION as interopAirgapEnvelopeVersion,
   applyFeeBuffer as interopApplyFeeBuffer,
+  checkMultisigQuorum as interopCheckMultisigQuorum,
   computeFeeRecommendations as interopComputeFeeRecommendations,
+  computeRbfFeeBump as interopComputeRbfFeeBump,
   computeTransferTransactionSigningHash as interopComputeTransferTransactionSigningHash,
   createFailoverClient as interopCreateFailoverClient,
   createWatchOnlyAccount as interopCreateWatchOnlyAccount,
   decodeAirgapTxEnvelope as interopDecodeAirgapTxEnvelope,
+  decodeMultisigProposalBundle as interopDecodeMultisigProposalBundle,
   decodeSignedCallTransaction as interopDecodeSignedCallTransaction,
   decodeSignedTransactionAuto as interopDecodeSignedTransactionAuto,
   decodeSignedTransferTransaction as interopDecodeSignedTransferTransaction,
@@ -74,7 +84,9 @@ import {
   deriveStorageSlotHex as interopDeriveStorageSlotHex,
   dryRunBatchCalls as interopDryRunBatchCalls,
   encodeAirgapTxEnvelope as interopEncodeAirgapTxEnvelope,
+  encodeMultisigProposalBundle as interopEncodeMultisigProposalBundle,
   EscrowClient as interopEscrowClient,
+  estimatePriorityFeeTiers as interopEstimatePriorityFeeTiers,
   estimateTxFeeWithBuffer as interopEstimateTxFeeWithBuffer,
   FailoverHttpTransport as interopFailoverHttpTransport,
   getAccountTxHistory as interopGetAccountTxHistory,
@@ -83,6 +95,8 @@ import {
   inspectAddress as interopInspectAddress,
   MAX_ACCOUNT_TX_HISTORY_LIMIT as interopMaxAccountTxHistoryLimit,
   MAX_JSONRPC_BATCH_SIZE as interopMaxJsonRpcBatchSize,
+  MULTISIG_BUNDLE_FORMAT as interopMultisigBundleFormat,
+  MULTISIG_BUNDLE_VERSION as interopMultisigBundleVersion,
   MultisigClient as interopMultisigClient,
   NameRegistryClient as interopNameRegistryClient,
   NftClient as interopNftClient,
@@ -113,7 +127,7 @@ describe("Immutable SDK Pin & Traceability", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
     const pinnedSha = pkg?.kovanicaSdk?.testedRevision;
 
-    expect(pinnedSha).toBe("d1fe6ae481c8df8bb1734f8ac9c7085c8a4216d3");
+    expect(pinnedSha).toBe("3ad6dc6e50a9aa95fab51c627a29f9fa108e9f2b");
     expect(pinnedSha).toMatch(/^[0-9a-f]{40}$/);
 
     const ciWorkflow = fs.readFileSync(path.join(rootDir, ".github/workflows/ci.yml"), "utf8");
@@ -185,6 +199,13 @@ describe("Immutable SDK Pin & Traceability", () => {
     expect(distContent).toContain("DEFAULT_WS_MAX_QUEUE_SIZE");
     expect(distContent).toContain("DEFAULT_BLOCK_RECEIPT_CONCURRENCY");
     expect(distContent).toContain("deriveStorageSlotHex");
+    expect(distContent).toContain("estimatePriorityFeeTiers");
+    expect(distContent).toContain("computeRbfFeeBump");
+    expect(distContent).toContain("checkMultisigQuorum");
+    expect(distContent).toContain("encodeMultisigProposalBundle");
+    expect(distContent).toContain("decodeMultisigProposalBundle");
+    expect(distContent).toContain("MULTISIG_BUNDLE_FORMAT");
+    expect(distContent).toContain("MULTISIG_BUNDLE_VERSION");
 
     expect(typeof readContractStorage).toBe("function");
     expect(typeof dryRunBatchCalls).toBe("function");
@@ -270,6 +291,22 @@ describe("Immutable SDK Pin & Traceability", () => {
     expect(interopDeriveStorageSlotHex).toBe(deriveStorageSlotHex);
     expect(interopDefaultWsMaxQueueSize).toBe(DEFAULT_WS_MAX_QUEUE_SIZE);
     expect(interopDefaultBlockReceiptConcurrency).toBe(DEFAULT_BLOCK_RECEIPT_CONCURRENCY);
+
+    // Assert Priority Fee Tiers, RBF Bump & Air-Gapped Multisig Quorum Bundle exports
+    expect(typeof estimatePriorityFeeTiers).toBe("function");
+    expect(typeof computeRbfFeeBump).toBe("function");
+    expect(typeof checkMultisigQuorum).toBe("function");
+    expect(typeof encodeMultisigProposalBundle).toBe("function");
+    expect(typeof decodeMultisigProposalBundle).toBe("function");
+    expect(MULTISIG_BUNDLE_FORMAT).toBe("kovanica-multisig-bundle-v1");
+    expect(MULTISIG_BUNDLE_VERSION).toBe(1);
+    expect(interopEstimatePriorityFeeTiers).toBe(estimatePriorityFeeTiers);
+    expect(interopComputeRbfFeeBump).toBe(computeRbfFeeBump);
+    expect(interopCheckMultisigQuorum).toBe(checkMultisigQuorum);
+    expect(interopEncodeMultisigProposalBundle).toBe(encodeMultisigProposalBundle);
+    expect(interopDecodeMultisigProposalBundle).toBe(decodeMultisigProposalBundle);
+    expect(interopMultisigBundleFormat).toBe(MULTISIG_BUNDLE_FORMAT);
+    expect(interopMultisigBundleVersion).toBe(MULTISIG_BUNDLE_VERSION);
 
     // Assert all 7 typed contract facades + MAX_JSONRPC_BATCH_SIZE are exported and re-exported identically
     expect(MAX_JSONRPC_BATCH_SIZE).toBe(32);
