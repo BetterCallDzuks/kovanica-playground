@@ -21,6 +21,9 @@ import {
   DEFAULT_ACCOUNT_TX_HISTORY_LIMIT,
   DEFAULT_ACCOUNT_TX_HISTORY_MAX_PAGES,
   DEFAULT_BLOCK_RECEIPT_CONCURRENCY,
+  DEFAULT_CONTRACT_LOGS_MAX_PAGES,
+  DEFAULT_CONTRACT_LOGS_MAX_SPAN,
+  DEFAULT_CONTRACT_LOGS_PAGE_LIMIT,
   DEFAULT_WS_MAX_QUEUE_SIZE,
   deriveStorageSlotHex,
   dryRunBatchCalls,
@@ -30,6 +33,7 @@ import {
   estimatePriorityFeeTiers,
   estimateTxFeeWithBuffer,
   FailoverHttpTransport,
+  formatContractLogCursor,
   getAccountTxHistory,
   getContractLogHistory,
   HtlcClient,
@@ -44,9 +48,11 @@ import {
   normalizeAddressList,
   parseAccountTxHistoryEntry,
   parseBip44Path,
+  parseContractLogCursor,
   parseMempoolFeeStats,
   peekTransactionVariant,
   probeRpcNode,
+  queryContractLogsPaginated,
   readContractStorage,
   sanitizeRpcUrl,
   signTransferTransaction,
@@ -80,6 +86,9 @@ import {
   DEFAULT_ACCOUNT_TX_HISTORY_LIMIT as interopDefaultAccountTxHistoryLimit,
   DEFAULT_ACCOUNT_TX_HISTORY_MAX_PAGES as interopDefaultAccountTxHistoryMaxPages,
   DEFAULT_BLOCK_RECEIPT_CONCURRENCY as interopDefaultBlockReceiptConcurrency,
+  DEFAULT_CONTRACT_LOGS_MAX_PAGES as interopDefaultContractLogsMaxPages,
+  DEFAULT_CONTRACT_LOGS_MAX_SPAN as interopDefaultContractLogsMaxSpan,
+  DEFAULT_CONTRACT_LOGS_PAGE_LIMIT as interopDefaultContractLogsPageLimit,
   DEFAULT_WS_MAX_QUEUE_SIZE as interopDefaultWsMaxQueueSize,
   deriveStorageSlotHex as interopDeriveStorageSlotHex,
   dryRunBatchCalls as interopDryRunBatchCalls,
@@ -89,6 +98,7 @@ import {
   estimatePriorityFeeTiers as interopEstimatePriorityFeeTiers,
   estimateTxFeeWithBuffer as interopEstimateTxFeeWithBuffer,
   FailoverHttpTransport as interopFailoverHttpTransport,
+  formatContractLogCursor as interopFormatContractLogCursor,
   getAccountTxHistory as interopGetAccountTxHistory,
   getContractLogHistory as interopGetContractLogHistory,
   HtlcClient as interopHtlcClient,
@@ -103,9 +113,11 @@ import {
   normalizeAddressList as interopNormalizeAddressList,
   parseAccountTxHistoryEntry as interopParseAccountTxHistoryEntry,
   parseBip44Path as interopParseBip44Path,
+  parseContractLogCursor as interopParseContractLogCursor,
   parseMempoolFeeStats as interopParseMempoolFeeStats,
   peekTransactionVariant as interopPeekTransactionVariant,
   probeRpcNode as interopProbeRpcNode,
+  queryContractLogsPaginated as interopQueryContractLogsPaginated,
   readContractStorage as interopReadContractStorage,
   sanitizeRpcUrl as interopSanitizeRpcUrl,
   signTransferTransaction as interopSignTransferTransaction,
@@ -127,7 +139,7 @@ describe("Immutable SDK Pin & Traceability", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
     const pinnedSha = pkg?.kovanicaSdk?.testedRevision;
 
-    expect(pinnedSha).toBe("3ad6dc6e50a9aa95fab51c627a29f9fa108e9f2b");
+    expect(pinnedSha).toBe("4694165cbf12a03c89c20c18b3dea462019d5c6c");
     expect(pinnedSha).toMatch(/^[0-9a-f]{40}$/);
 
     const ciWorkflow = fs.readFileSync(path.join(rootDir, ".github/workflows/ci.yml"), "utf8");
@@ -206,6 +218,12 @@ describe("Immutable SDK Pin & Traceability", () => {
     expect(distContent).toContain("decodeMultisigProposalBundle");
     expect(distContent).toContain("MULTISIG_BUNDLE_FORMAT");
     expect(distContent).toContain("MULTISIG_BUNDLE_VERSION");
+    expect(distContent).toContain("queryContractLogsPaginated");
+    expect(distContent).toContain("parseContractLogCursor");
+    expect(distContent).toContain("formatContractLogCursor");
+    expect(distContent).toContain("DEFAULT_CONTRACT_LOGS_MAX_SPAN");
+    expect(distContent).toContain("DEFAULT_CONTRACT_LOGS_MAX_PAGES");
+    expect(distContent).toContain("DEFAULT_CONTRACT_LOGS_PAGE_LIMIT");
 
     expect(typeof readContractStorage).toBe("function");
     expect(typeof dryRunBatchCalls).toBe("function");
@@ -307,6 +325,20 @@ describe("Immutable SDK Pin & Traceability", () => {
     expect(interopDecodeMultisigProposalBundle).toBe(decodeMultisigProposalBundle);
     expect(interopMultisigBundleFormat).toBe(MULTISIG_BUNDLE_FORMAT);
     expect(interopMultisigBundleVersion).toBe(MULTISIG_BUNDLE_VERSION);
+
+    // Assert SDK v0.7.0 Paginated Contract Logs exports and re-exports
+    expect(typeof queryContractLogsPaginated).toBe("function");
+    expect(typeof parseContractLogCursor).toBe("function");
+    expect(typeof formatContractLogCursor).toBe("function");
+    expect(DEFAULT_CONTRACT_LOGS_MAX_SPAN).toBe(500);
+    expect(DEFAULT_CONTRACT_LOGS_MAX_PAGES).toBe(20);
+    expect(DEFAULT_CONTRACT_LOGS_PAGE_LIMIT).toBe(200);
+    expect(interopQueryContractLogsPaginated).toBe(queryContractLogsPaginated);
+    expect(interopParseContractLogCursor).toBe(parseContractLogCursor);
+    expect(interopFormatContractLogCursor).toBe(formatContractLogCursor);
+    expect(interopDefaultContractLogsMaxSpan).toBe(DEFAULT_CONTRACT_LOGS_MAX_SPAN);
+    expect(interopDefaultContractLogsMaxPages).toBe(DEFAULT_CONTRACT_LOGS_MAX_PAGES);
+    expect(interopDefaultContractLogsPageLimit).toBe(DEFAULT_CONTRACT_LOGS_PAGE_LIMIT);
 
     // Assert all 7 typed contract facades + MAX_JSONRPC_BATCH_SIZE are exported and re-exported identically
     expect(MAX_JSONRPC_BATCH_SIZE).toBe(32);

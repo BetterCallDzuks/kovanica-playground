@@ -6,6 +6,7 @@ import {
 } from "kovanica-sdk";
 import { AccountHistoryWatchOnlyPanel } from "./AccountHistoryWatchOnlyPanel";
 import { FeeTiersMultisigPanel } from "./FeeTiersMultisigPanel";
+import { PaginatedContractLogsPanel } from "./PaginatedContractLogsPanel";
 import { StorageSlotStudioPanel } from "./StorageSlotStudioPanel";
 import {
   AIRGAP_ENVELOPE_PREFIX,
@@ -3810,6 +3811,9 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
 
       {/* Storage Slot Deriver Studio */}
       <StorageSlotStudioPanel client={client} />
+
+      {/* Paginated Contract Logs Explorer (SDK v0.7.0) */}
+      <PaginatedContractLogsPanel client={client} />
 
       {/* Account History & Watch-Only Inspector */}
       <AccountHistoryWatchOnlyPanel
