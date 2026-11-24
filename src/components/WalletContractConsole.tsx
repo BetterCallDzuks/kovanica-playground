@@ -4,6 +4,7 @@ import {
   type KovanicaClient,
   KOVANICA_COIN_TYPE,
 } from "kovanica-sdk";
+import { AccountHistoryWatchOnlyPanel } from "./AccountHistoryWatchOnlyPanel";
 import {
   AIRGAP_ENVELOPE_PREFIX,
   buildEscrowCreateCall,
@@ -3804,6 +3805,13 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
           </div>
         )}
       </div>
+
+      {/* Account History & Watch-Only Inspector */}
+      <AccountHistoryWatchOnlyPanel
+        client={client}
+        selectedChainId={selectedChainId}
+        defaultAddress={activeAccount?.address}
+      />
 
       {/* Self-Test & Invariant Verification Suite */}
       <div className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-4">

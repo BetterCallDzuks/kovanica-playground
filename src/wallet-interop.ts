@@ -14,6 +14,7 @@ import {
   computeTransferTransactionSigningHash,
   ContractFacade,
   createFailoverClient,
+  createWatchOnlyAccount,
   decodeAddress,
   decodeAirgapTxEnvelope,
   decodeContractLog,
@@ -28,6 +29,8 @@ import {
   decodeTokenMetadata,
   decodeTransactionReceiptLogs,
   decodeVaultRecord,
+  DEFAULT_ACCOUNT_TX_HISTORY_LIMIT,
+  DEFAULT_ACCOUNT_TX_HISTORY_MAX_PAGES,
   DEFAULT_IDEMPOTENT_RPC_METHODS,
   DEFAULT_LOG_HISTORY_CHUNK_SIZE,
   deriveBip44,
@@ -43,6 +46,8 @@ import {
   estimateTxFeeWithBuffer,
   FailoverHttpTransport,
   formatBip44Path,
+  formatKvnc,
+  getAccountTxHistory,
   getContractLogHistory,
   getPublicKey,
   HtlcClient,
@@ -50,11 +55,14 @@ import {
   KOVANICA_COIN_TYPE,
   KovanicaClient,
   KovanicaDecodeError,
+  MAX_ACCOUNT_TX_HISTORY_LIMIT,
   MAX_JSONRPC_BATCH_SIZE,
   MultisigClient,
   NameRegistryClient,
   NftClient,
   normalizeAddressList,
+  parseAccountTxHistoryEntry,
+  parseBip44Path,
   parseMempoolFeeStats,
   peekTransactionVariant,
   probeRpcNode,
@@ -65,6 +73,7 @@ import {
   TESTNET_ADDRESS_PREFIX,
   TokenClient,
   toHexQuantity,
+  validateBip44Path,
   VaultClient,
   verifyCallTransactionSignature,
   verifyEd25519,
@@ -72,12 +81,20 @@ import {
   verifyTransferTransactionSignature,
   waitForTransactionFinality,
   waitForTransactionReceipt,
+  type AccountTxDirection,
+  type AccountTxHistoryClient,
+  type AccountTxHistoryEntry,
+  type AccountTxHistoryResult,
+  type AccountTxStatus,
   type AddressFormat,
   type AddressInspectionResult,
   type AirgapTxEnvelope,
   type AirgapTxKind,
   type BatchDryRunItemResult,
   type BatchDryRunResult,
+  type Bip44PathHardening,
+  type Bip44PathOptions,
+  type Bip44PathValidationResult,
   type ContractEventSubscriptionHandle,
   type ContractFacadeClient,
   type ContractLogEntry,
@@ -123,9 +140,11 @@ import {
   type FinalityReceiptLike,
   type FinalityResult,
   type FinalityStatus,
+  type GetAccountTxHistoryOptions,
   type GetContractLogHistoryOptions,
   type GetLogsClient,
   type GetLogsFilter,
+  type GetTransactionHistoryParams,
   type HtlcCreateParams,
   type JsonRpcBatchItemResult,
   type JsonRpcBatchRequestItem,
@@ -138,8 +157,11 @@ import {
   type NftMintParams,
   type NormalizeAddressListOptions,
   type NormalizeAddressListResult,
+  type ParsedBip44Path,
   type PreparedBatchCallTransactions,
   type PreparedCallTransaction,
+  type RawAccountTxHistoryEntry,
+  type RawAccountTxHistoryPage,
   type ReadContractStorageClient,
   type ReadContractStorageOptions,
   type ReceiptLogEntry,
@@ -161,6 +183,8 @@ import {
   type WaitForFinalityOptions,
   type WaitForTransactionReceiptClient,
   type WaitForTransactionReceiptOptions,
+  type WatchOnlyAccount,
+  type WatchOnlyNetwork,
 } from "kovanica-sdk";
 
 // Configure ed25519 sha512 provider
@@ -848,6 +872,9 @@ export {
   computeTransferTransactionSigningHash,
   ContractFacade,
   createFailoverClient,
+  createWatchOnlyAccount,
+  DEFAULT_ACCOUNT_TX_HISTORY_LIMIT,
+  DEFAULT_ACCOUNT_TX_HISTORY_MAX_PAGES,
   DEFAULT_LOG_HISTORY_CHUNK_SIZE,
   decodeAirgapTxEnvelope,
   decodeContractLog,
@@ -865,15 +892,20 @@ export {
   estimateCallTxSize,
   estimateTxFeeWithBuffer,
   FailoverHttpTransport,
+  formatKvnc,
+  getAccountTxHistory,
   getContractLogHistory,
   HtlcClient,
   inspectAddress,
   KovanicaDecodeError,
+  MAX_ACCOUNT_TX_HISTORY_LIMIT,
   MAX_JSONRPC_BATCH_SIZE,
   MultisigClient,
   NameRegistryClient,
   NftClient,
   normalizeAddressList,
+  parseAccountTxHistoryEntry,
+  parseBip44Path,
   parseMempoolFeeStats,
   peekTransactionVariant,
   probeRpcNode,
@@ -882,6 +914,7 @@ export {
   signTransferTransaction,
   subscribeContractEvents,
   TokenClient,
+  validateBip44Path,
   VaultClient,
   verifyCallTransactionSignature,
   verifyEd25519,
@@ -889,12 +922,20 @@ export {
   verifyTransferTransactionSignature,
   waitForTransactionFinality,
   waitForTransactionReceipt,
+  type AccountTxDirection,
+  type AccountTxHistoryClient,
+  type AccountTxHistoryEntry,
+  type AccountTxHistoryResult,
+  type AccountTxStatus,
   type AddressFormat,
   type AddressInspectionResult,
   type AirgapTxEnvelope,
   type AirgapTxKind,
   type BatchDryRunItemResult,
   type BatchDryRunResult,
+  type Bip44PathHardening,
+  type Bip44PathOptions,
+  type Bip44PathValidationResult,
   type ContractEventSubscriptionHandle,
   type ContractFacadeClient,
   type ContractLogEntry,
@@ -940,9 +981,11 @@ export {
   type FinalityReceiptLike,
   type FinalityResult,
   type FinalityStatus,
+  type GetAccountTxHistoryOptions,
   type GetContractLogHistoryOptions,
   type GetLogsClient,
   type GetLogsFilter,
+  type GetTransactionHistoryParams,
   type HtlcCreateParams,
   type JsonRpcBatchItemResult,
   type JsonRpcBatchRequestItem,
@@ -955,8 +998,11 @@ export {
   type NftMintParams,
   type NormalizeAddressListOptions,
   type NormalizeAddressListResult,
+  type ParsedBip44Path,
   type PreparedBatchCallTransactions,
   type PreparedCallTransaction,
+  type RawAccountTxHistoryEntry,
+  type RawAccountTxHistoryPage,
   type ReadContractStorageClient,
   type ReadContractStorageOptions,
   type ReceiptLogEntry,
@@ -978,6 +1024,8 @@ export {
   type WaitForFinalityOptions,
   type WaitForTransactionReceiptClient,
   type WaitForTransactionReceiptOptions,
+  type WatchOnlyAccount,
+  type WatchOnlyNetwork,
 };
 
 export interface EstimateContractCallBatchOptions {
@@ -3109,6 +3157,121 @@ export async function runMempoolFeeTierProbe(
     priorityAtoms: recommendations.priority.toString(),
   };
 }
+
+// --- Watch-Only Account Inspector & Account Tx History Explorer ---
+
+export type WatchOnlyInspectionResult =
+  | {
+      ok: true;
+      account: WatchOnlyAccount;
+    }
+  | {
+      ok: false;
+      error: string;
+    };
+
+/**
+ * Validates a PRO-21 address and optional chain ID via `createWatchOnlyAccount`,
+ * returning a structured result without throwing for UI form validation.
+ */
+export function inspectWatchOnlyAccount(
+  address: string,
+  chainId?: number,
+): WatchOnlyInspectionResult {
+  const trimmed = address.trim();
+  if (trimmed.length === 0) {
+    return { ok: false, error: "PRO-21 address is required (kvnc...dag or tknc...dag)" };
+  }
+  try {
+    const account = createWatchOnlyAccount(trimmed, chainId);
+    return { ok: true, account };
+  } catch (err: unknown) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+export interface AccountTxHistoryQueryOptions {
+  address: string;
+  direction?: AccountTxDirection;
+  limit?: number;
+  maxPages?: number;
+  cursor?: string;
+  signal?: AbortSignal;
+}
+
+export interface FormattedAccountTxHistoryItem {
+  hash: string;
+  height: string;
+  timestamp: string | null;
+  from: string;
+  to: string | null;
+  amountAtoms: string;
+  amountKvnc: string;
+  feeAtoms: string;
+  feeKvnc: string;
+  kind: string;
+  status: AccountTxStatus;
+}
+
+export interface AccountTxHistorySummary {
+  address: string;
+  direction: AccountTxDirection;
+  items: FormattedAccountTxHistoryItem[];
+  nextCursor: string | null;
+  hasMore: boolean;
+  pagesFetched: number;
+}
+
+/**
+ * Fetches paginated account transaction history via `getAccountTxHistory` and formats
+ * all `bigint` fields (`amount`, `fee`, `height`, `timestamp`) losslessly for UI display
+ * and JSON serialization.
+ */
+export async function fetchAccountTxHistorySummary(
+  client: AccountTxHistoryClient,
+  options: AccountTxHistoryQueryOptions,
+): Promise<AccountTxHistorySummary> {
+  const address = options.address.trim();
+  if (address.length === 0) {
+    throw new Error("Account address is required to fetch transaction history");
+  }
+  const direction: AccountTxDirection = options.direction ?? "all";
+  const result = await getAccountTxHistory(client, {
+    address,
+    direction,
+    ...(options.limit !== undefined ? { limit: options.limit } : {}),
+    ...(options.maxPages !== undefined ? { maxPages: options.maxPages } : {}),
+    ...(options.cursor !== undefined && options.cursor.trim().length > 0
+      ? { cursor: options.cursor.trim() }
+      : {}),
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+
+  return {
+    address,
+    direction,
+    items: result.items.map((entry) => ({
+      hash: entry.hash,
+      height: entry.height.toString(),
+      timestamp: entry.timestamp !== null ? entry.timestamp.toString() : null,
+      from: entry.from,
+      to: entry.to,
+      amountAtoms: entry.amount.toString(),
+      amountKvnc: formatKvnc(entry.amount),
+      feeAtoms: entry.fee.toString(),
+      feeKvnc: formatKvnc(entry.fee),
+      kind: entry.kind,
+      status: entry.status,
+    })),
+    nextCursor: result.nextCursor,
+    hasMore: result.hasMore,
+    pagesFetched: result.pagesFetched,
+  };
+}
+
 
 
 

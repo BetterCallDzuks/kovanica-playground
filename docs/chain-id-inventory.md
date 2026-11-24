@@ -1,7 +1,7 @@
 # Canonical Chain-ID Inventory (`kovanica-playground` & `kovanica-sdk`)
 
 > **Scope & Alignment Notice:**
-> This document records the canonical 3-chain registry across `kovanica-playground`, `BetterCallDzuks/kovanica-sdk` **`v0.5.0`** (pinned `testedRevision`: `7e267ab595515badcdc03c82c8eed40c2a1a2e2e`), and the Kovanica L1 reference boundary (`crates/kovanica-params/src/lib.rs`, `crates/kovanica-types/src/address.rs`, and `crates/kovanica-types/src/signing.rs`).
+> This document records the canonical 3-chain registry across `kovanica-playground`, `BetterCallDzuks/kovanica-sdk` **`v0.5.0`** (pinned `testedRevision`: `9dde747d6f8e7344ebea9966c164c15a8b7ba77c`), and the Kovanica L1 reference boundary (`crates/kovanica-params/src/lib.rs`, `crates/kovanica-types/src/address.rs`, and `crates/kovanica-types/src/signing.rs`).
 > Legacy/experimental Chain IDs `4` (`TESTNET_V2`), `5` (`hybrid5`), and `1337` (`LOCAL`) are retired and removed from `CHAIN_IDS`.
 
 ---
@@ -70,7 +70,7 @@
   - Calls `isValidAddress(str, chainId)` from `kovanica-sdk`.
 
 ### 3.3 Interactive Developer Studios (`src/wallet-interop.ts`, `src/components/WalletContractConsole.tsx`, `src/components/WsSubscriptionConsole.tsx`)
-All 7 interactive developer studios powered by `kovanica-sdk v0.5.0` (`7e267ab595515badcdc03c82c8eed40c2a1a2e2e`) adhere to the canonical Chain `1` / `2` / `3` boundaries:
+All 7 interactive developer studios powered by `kovanica-sdk v0.5.0` (`9dde747d6f8e7344ebea9966c164c15a8b7ba77c`) adhere to the canonical Chain `1` / `2` / `3` boundaries:
 1. **Typed Contract Facades Studio:** Direct read workflows across all 7 canonical Wasmi contract clients (`NameRegistryClient`, `TokenClient`, `EscrowClient`, `HtlcClient`, `NftClient`, `VaultClient`, `MultisigClient`), BLAKE3 storage slot derivation, and typed Bincode state decoding.
 2. **Inline WS Bincode Log Decoder:** Live WebSocket subscription console (`KovanicaWsClient`) with inline Bincode contract event decoding and reconnection diagnostics.
 3. **Contract Log History & Failover RPC Tester:** Chunked `getContractLogHistory` queries paired with a `FailoverHttpTransport` multi-endpoint health and automatic failover probe.
@@ -81,7 +81,7 @@ All 7 interactive developer studios powered by `kovanica-sdk v0.5.0` (`7e267ab59
 
 ### 3.4 `tests/`
 - **`tests/methods.test.ts`:**
-  - Verifies that `package.json` (`kovanicaSdk.testedRevision`), `.github/workflows/ci.yml`, and resolved `node_modules/kovanica-sdk` match pinned `kovanica-sdk v0.5.0` SHA `7e267ab595515badcdc03c82c8eed40c2a1a2e2e`, and asserts exports including `probeRpcNode`.
+  - Verifies that `package.json` (`kovanicaSdk.testedRevision`), `.github/workflows/ci.yml`, and resolved `node_modules/kovanica-sdk` match pinned `kovanica-sdk v0.5.0` SHA `9dde747d6f8e7344ebea9966c164c15a8b7ba77c`, and asserts exports including `probeRpcNode`.
   - Verifies that bare hex addresses (`0x00...00`) are rejected on `CHAIN_IDS.MAINNET` (`1`) and `CHAIN_IDS.TESTNET` (`2`), and accepted on `CHAIN_IDS.DEVNET` (`3`).
 - **`tests/wallet-interop.test.ts` & `tests/ws-console.test.tsx`:**
   - Exercises chain-scoped signing, address formatting/inspection across Chains `1` / `2` / `3`, `probeRpcNode` header/tag verification, air-gap envelopes, mempool fee-tier estimation, and WS Bincode log decoding across the 7 developer studios.
@@ -94,7 +94,7 @@ All 7 interactive developer studios powered by `kovanica-sdk v0.5.0` (`7e267ab59
 
 ## 4. Upstream SDK Boundary (`BetterCallDzuks/kovanica-sdk` `v0.5.0`)
 
-- **Pinned Revision:** `BetterCallDzuks/kovanica-sdk` **`v0.5.0`** at immutable commit `7e267ab595515badcdc03c82c8eed40c2a1a2e2e` (recorded in `package.json` → `kovanicaSdk.testedRevision`).
+- **Pinned Revision:** `BetterCallDzuks/kovanica-sdk` **`v0.5.0`** at immutable commit `9dde747d6f8e7344ebea9966c164c15a8b7ba77c` (recorded in `package.json` → `kovanicaSdk.testedRevision`).
 - **`src/chains.ts`:**
   - Exports `CHAIN_IDS` (`MAINNET: 1`, `TESTNET: 2`, `HYBRID_TESTNET: 2`, `DEVNET: 3`), `NETWORK_TAGS` (`MAINNET: "1-f35df34c92001436"`, `TESTNET: "2-24cdb5fadd98b207"`), `KNOWN_CHAINS`, `getChainConfig(chainId)`, and `isLegacyAddressAllowed(chainId)`. Retired `LOCAL: 1337` is removed.
   - `isLegacyAddressAllowed(chainId)` returns `true` only for `DEVNET (3)`. It returns `false` for `MAINNET (1)`, `TESTNET (2)`, and all retired/unknown chain IDs.
