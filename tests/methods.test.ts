@@ -17,6 +17,9 @@ import {
   decodeSignedTransferTransaction,
   DEFAULT_ACCOUNT_TX_HISTORY_LIMIT,
   DEFAULT_ACCOUNT_TX_HISTORY_MAX_PAGES,
+  DEFAULT_BLOCK_RECEIPT_CONCURRENCY,
+  DEFAULT_WS_MAX_QUEUE_SIZE,
+  deriveStorageSlotHex,
   dryRunBatchCalls,
   encodeAirgapTxEnvelope,
   EscrowClient,
@@ -41,6 +44,7 @@ import {
   sanitizeRpcUrl,
   signTransferTransaction,
   subscribeContractEvents,
+  subscribeNewBlocksWithReceipts,
   TokenClient,
   validateBip44Path,
   VaultClient,
@@ -65,6 +69,9 @@ import {
   decodeSignedTransferTransaction as interopDecodeSignedTransferTransaction,
   DEFAULT_ACCOUNT_TX_HISTORY_LIMIT as interopDefaultAccountTxHistoryLimit,
   DEFAULT_ACCOUNT_TX_HISTORY_MAX_PAGES as interopDefaultAccountTxHistoryMaxPages,
+  DEFAULT_BLOCK_RECEIPT_CONCURRENCY as interopDefaultBlockReceiptConcurrency,
+  DEFAULT_WS_MAX_QUEUE_SIZE as interopDefaultWsMaxQueueSize,
+  deriveStorageSlotHex as interopDeriveStorageSlotHex,
   dryRunBatchCalls as interopDryRunBatchCalls,
   encodeAirgapTxEnvelope as interopEncodeAirgapTxEnvelope,
   EscrowClient as interopEscrowClient,
@@ -89,6 +96,7 @@ import {
   sanitizeRpcUrl as interopSanitizeRpcUrl,
   signTransferTransaction as interopSignTransferTransaction,
   subscribeContractEvents as interopSubscribeContractEvents,
+  subscribeNewBlocksWithReceipts as interopSubscribeNewBlocksWithReceipts,
   TokenClient as interopTokenClient,
   validateBip44Path as interopValidateBip44Path,
   VaultClient as interopVaultClient,
@@ -105,7 +113,7 @@ describe("Immutable SDK Pin & Traceability", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
     const pinnedSha = pkg?.kovanicaSdk?.testedRevision;
 
-    expect(pinnedSha).toBe("9dde747d6f8e7344ebea9966c164c15a8b7ba77c");
+    expect(pinnedSha).toBe("d1fe6ae481c8df8bb1734f8ac9c7085c8a4216d3");
     expect(pinnedSha).toMatch(/^[0-9a-f]{40}$/);
 
     const ciWorkflow = fs.readFileSync(path.join(rootDir, ".github/workflows/ci.yml"), "utf8");
@@ -173,6 +181,10 @@ describe("Immutable SDK Pin & Traceability", () => {
     expect(distContent).toContain("createWatchOnlyAccount");
     expect(distContent).toContain("parseBip44Path");
     expect(distContent).toContain("validateBip44Path");
+    expect(distContent).toContain("subscribeNewBlocksWithReceipts");
+    expect(distContent).toContain("DEFAULT_WS_MAX_QUEUE_SIZE");
+    expect(distContent).toContain("DEFAULT_BLOCK_RECEIPT_CONCURRENCY");
+    expect(distContent).toContain("deriveStorageSlotHex");
 
     expect(typeof readContractStorage).toBe("function");
     expect(typeof dryRunBatchCalls).toBe("function");
@@ -248,6 +260,16 @@ describe("Immutable SDK Pin & Traceability", () => {
     expect(interopDefaultAccountTxHistoryLimit).toBe(DEFAULT_ACCOUNT_TX_HISTORY_LIMIT);
     expect(interopMaxAccountTxHistoryLimit).toBe(MAX_ACCOUNT_TX_HISTORY_LIMIT);
     expect(interopDefaultAccountTxHistoryMaxPages).toBe(DEFAULT_ACCOUNT_TX_HISTORY_MAX_PAGES);
+
+    // Assert SDK v0.6.0 WS block+receipt streamer & storage slot deriver exports
+    expect(typeof subscribeNewBlocksWithReceipts).toBe("function");
+    expect(typeof deriveStorageSlotHex).toBe("function");
+    expect(DEFAULT_WS_MAX_QUEUE_SIZE).toBe(256);
+    expect(DEFAULT_BLOCK_RECEIPT_CONCURRENCY).toBe(8);
+    expect(interopSubscribeNewBlocksWithReceipts).toBe(subscribeNewBlocksWithReceipts);
+    expect(interopDeriveStorageSlotHex).toBe(deriveStorageSlotHex);
+    expect(interopDefaultWsMaxQueueSize).toBe(DEFAULT_WS_MAX_QUEUE_SIZE);
+    expect(interopDefaultBlockReceiptConcurrency).toBe(DEFAULT_BLOCK_RECEIPT_CONCURRENCY);
 
     // Assert all 7 typed contract facades + MAX_JSONRPC_BATCH_SIZE are exported and re-exported identically
     expect(MAX_JSONRPC_BATCH_SIZE).toBe(32);

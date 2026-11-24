@@ -1,10 +1,21 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   decodeContractLog,
+  DEFAULT_BLOCK_RECEIPT_CONCURRENCY,
+  DEFAULT_WS_MAX_QUEUE_SIZE,
+  KovanicaClient,
   KovanicaWsClient,
+  subscribeNewBlocksWithReceipts,
+  type BlockReceiptErrorContext,
+  type BlockReceiptsRpcClient,
+  type BlockWithReceiptsEvent,
+  type BlockWithReceiptsSubscriptionHandle,
   type ContractLogKind,
   type DecodedContractLog,
+  type WsBackpressureDropEvent,
+  type WsBackpressureOverflowPolicy,
   type WsLogFilter,
+  type WsNewHeadEvent,
 } from "kovanica-sdk";
 
 export type SubscriptionChannel = "newHeads" | "committedLeaders" | "logs";
@@ -65,8 +76,21 @@ export interface WebSocketLike {
 
 export type WebSocketConstructor = new (url: string) => WebSocketLike;
 
+export interface WsBlockReceiptEntry {
+  uid: string;
+  receivedAt: string;
+  heightLabel: string;
+  blockHash: string;
+  receiptCount: number;
+  succeededCount: number;
+  failedCount: number;
+  droppedBeforeThis: number;
+  receiptsJson: string;
+}
+
 export interface WsSubscriptionConsoleProps {
   rpcUrl: string;
+  rpcClient?: BlockReceiptsRpcClient;
   WebSocketImpl?: WebSocketConstructor;
   maxEvents?: number;
 }
@@ -215,6 +239,7 @@ export function tryDecodeWsLogPayload(
 
 export function WsSubscriptionConsole({
   rpcUrl,
+  rpcClient,
   WebSocketImpl,
   maxEvents = DEFAULT_MAX_EVENTS,
 }: WsSubscriptionConsoleProps) {
@@ -238,12 +263,40 @@ export function WsSubscriptionConsole({
   const [totalReceived, setTotalReceived] = useState<number>(0);
   const [copiedUid, setCopiedUid] = useState<string | null>(null);
 
+  // Live Block+Receipt Streamer state (subscribeNewBlocksWithReceipts)
+  const [blockMaxQueueInput, setBlockMaxQueueInput] = useState<string>(
+    String(DEFAULT_WS_MAX_QUEUE_SIZE),
+  );
+  const [blockConcurrencyInput, setBlockConcurrencyInput] = useState<string>(
+    String(DEFAULT_BLOCK_RECEIPT_CONCURRENCY),
+  );
+  const [blockOverflowPolicy, setBlockOverflowPolicy] =
+    useState<WsBackpressureOverflowPolicy>("drop-oldest");
+  const [blockStreamStatus, setBlockStreamStatus] = useState<
+    "idle" | "starting" | "streaming" | "error"
+  >("idle");
+  const [blockStreamSubId, setBlockStreamSubId] = useState<string | null>(null);
+  const [blockStreamError, setBlockStreamError] = useState<string | null>(null);
+  const [blockDroppedCount, setBlockDroppedCount] = useState<number>(0);
+  const [blockPendingCount, setBlockPendingCount] = useState<number>(0);
+  const [blockReceiptEntries, setBlockReceiptEntries] = useState<WsBlockReceiptEntry[]>([]);
+
   // Mutable refs for KovanicaWsClient callbacks
   const wsClientRef = useRef<KovanicaWsClient | null>(null);
+  const blockHandleRef = useRef<BlockWithReceiptsSubscriptionHandle | null>(null);
+  const blockSeqRef = useRef<number>(1);
   const eventSeqRef = useRef<number>(1);
   const subscriptionsRef = useRef<Map<string, ActiveSubscription>>(new Map());
   const isPausedRef = useRef<boolean>(false);
   const maxEventsRef = useRef<number>(maxEvents);
+
+  const effectiveRpcClient = useMemo<BlockReceiptsRpcClient>(() => {
+    if (rpcClient) return rpcClient;
+    return new KovanicaClient({
+      url: rpcUrl,
+      fetch: (input, init) => globalThis.fetch(input, init),
+    });
+  }, [rpcClient, rpcUrl]);
 
   useEffect(() => {
     isPausedRef.current = isPaused;
@@ -284,6 +337,17 @@ export function WsSubscriptionConsole({
   );
 
   const cleanupClient = useCallback((closeClient: boolean) => {
+    const activeBlockHandle = blockHandleRef.current;
+    blockHandleRef.current = null;
+    if (activeBlockHandle) {
+      void activeBlockHandle.unsubscribe().catch(() => {
+        // Ignore unsubscribe errors while tearing down socket
+      });
+    }
+    setBlockStreamStatus("idle");
+    setBlockStreamSubId(null);
+    setBlockPendingCount(0);
+
     const current = wsClientRef.current;
     wsClientRef.current = null;
     subscriptionsRef.current.clear();
@@ -496,6 +560,135 @@ export function WsSubscriptionConsole({
     setEvents([]);
     setBufferedEvents([]);
     setTotalReceived(0);
+  }, []);
+
+  const handleStopBlockReceiptStream = useCallback(async () => {
+    const handle = blockHandleRef.current;
+    blockHandleRef.current = null;
+    setBlockStreamSubId(null);
+    setBlockPendingCount(0);
+    setBlockStreamStatus("idle");
+    if (handle) {
+      try {
+        await handle.unsubscribe();
+      } catch (err: unknown) {
+        setBlockStreamError(err instanceof Error ? err.message : String(err));
+      }
+    }
+  }, []);
+
+  const handleStartBlockReceiptStream = useCallback(async () => {
+    const client = wsClientRef.current;
+    if (!client || connectionState !== "connected" || !client.isConnected) {
+      setBlockStreamError("Connect to a WebSocket endpoint before starting the Block+Receipt stream.");
+      return;
+    }
+
+    const parsedQueue = Number.parseInt(blockMaxQueueInput.trim(), 10);
+    if (!Number.isSafeInteger(parsedQueue) || parsedQueue < 1) {
+      setBlockStreamError("Max Queue Size must be a positive integer.");
+      return;
+    }
+
+    const parsedConcurrency = Number.parseInt(blockConcurrencyInput.trim(), 10);
+    if (!Number.isSafeInteger(parsedConcurrency) || parsedConcurrency < 1) {
+      setBlockStreamError("Receipt Concurrency must be a positive integer.");
+      return;
+    }
+
+    // Stop any previous block+receipt subscription first
+    if (blockHandleRef.current) {
+      await handleStopBlockReceiptStream();
+    }
+
+    setBlockStreamError(null);
+    setBlockStreamStatus("starting");
+
+    try {
+      const handle = await subscribeNewBlocksWithReceipts(
+        client,
+        effectiveRpcClient,
+        (event: BlockWithReceiptsEvent) => {
+          if (wsClientRef.current !== client) return;
+
+          const rawHeight =
+            event.head.number ??
+            (event.head as Record<string, unknown>).height ??
+            event.head.round ??
+            event.block?.number;
+          const heightLabel =
+            rawHeight !== undefined && rawHeight !== null ? String(rawHeight) : "—";
+          const blockHash = event.head.hash || event.block?.hash || "unknown";
+          const succeededCount = event.receipts.filter((r) => r.success || r.status === 1).length;
+          const failedCount = event.receipts.length - succeededCount;
+
+          const item: WsBlockReceiptEntry = {
+            uid: `blk-${blockSeqRef.current++}`,
+            receivedAt: new Date().toISOString(),
+            heightLabel,
+            blockHash,
+            receiptCount: event.receipts.length,
+            succeededCount,
+            failedCount,
+            droppedBeforeThis: event.droppedBeforeThis,
+            receiptsJson: safeFormatJson(event.receipts),
+          };
+
+          const cap = Math.max(1, maxEventsRef.current);
+          setBlockReceiptEntries((prev) => [item, ...prev].slice(0, cap));
+
+          const activeHandle = blockHandleRef.current;
+          if (activeHandle) {
+            setBlockDroppedCount(activeHandle.droppedCount);
+            setBlockPendingCount(activeHandle.pendingCount);
+          } else if (event.droppedBeforeThis > 0) {
+            setBlockDroppedCount((prev) => prev + event.droppedBeforeThis);
+          }
+        },
+        {
+          maxQueueSize: parsedQueue,
+          receiptConcurrency: parsedConcurrency,
+          overflowPolicy: blockOverflowPolicy,
+          onBackpressureDrop: (drop: WsBackpressureDropEvent<WsNewHeadEvent>) => {
+            if (wsClientRef.current !== client) return;
+            setBlockDroppedCount(drop.droppedCount);
+            setBlockPendingCount(drop.queueSize);
+          },
+          onError: (err: Error, ctx?: BlockReceiptErrorContext) => {
+            if (wsClientRef.current !== client) return;
+            const stagePrefix = ctx?.stage ? `[${ctx.stage}] ` : "";
+            setBlockStreamError(`${stagePrefix}${err.message}`);
+          },
+        },
+      );
+
+      if (wsClientRef.current !== client) {
+        void handle.unsubscribe().catch(() => {});
+        return;
+      }
+
+      blockHandleRef.current = handle;
+      setBlockStreamSubId(handle.subscriptionId);
+      setBlockDroppedCount(handle.droppedCount);
+      setBlockPendingCount(handle.pendingCount);
+      setBlockStreamStatus("streaming");
+    } catch (err: unknown) {
+      setBlockStreamStatus("error");
+      setBlockStreamError(err instanceof Error ? err.message : String(err));
+    }
+  }, [
+    blockConcurrencyInput,
+    blockMaxQueueInput,
+    blockOverflowPolicy,
+    connectionState,
+    effectiveRpcClient,
+    handleStopBlockReceiptStream,
+  ]);
+
+  const handleClearBlockReceipts = useCallback(() => {
+    setBlockReceiptEntries([]);
+    setBlockDroppedCount(blockHandleRef.current?.droppedCount ?? 0);
+    setBlockStreamError(null);
   }, []);
 
   const handleCopyEvent = useCallback((entry: WsEventEntry) => {
@@ -716,6 +909,214 @@ export function WsSubscriptionConsole({
             </div>
           )}
         </div>
+      </div>
+
+      {/* Live Block + Receipt Streamer Card (subscribeNewBlocksWithReceipts) */}
+      <div
+        data-testid="ws-block-receipts-panel"
+        className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-4"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-4">
+          <div>
+            <h2 className="text-sm font-semibold text-fg">
+              Live Block + Receipt Streamer (SDK v0.6.0{" "}
+              <code className="font-mono text-gold">subscribeNewBlocksWithReceipts</code>)
+            </h2>
+            <p className="text-xs text-muted">
+              Subscribes to <code className="font-mono text-fg">newHeads</code> and enriches each block with
+              transaction receipts using bounded concurrency and a capped backpressure queue.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <span
+              data-testid="ws-block-receipts-status"
+              className={`px-2.5 py-1 rounded-md border font-mono capitalize ${
+                blockStreamStatus === "streaming"
+                  ? "bg-emerald-950/60 border-emerald-700/50 text-emerald-300"
+                  : blockStreamStatus === "error"
+                  ? "bg-red-950/60 border-red-700/50 text-red-300"
+                  : "bg-surface-2 border-border text-muted"
+              }`}
+            >
+              {blockStreamStatus}
+              {blockStreamSubId ? ` (${blockStreamSubId})` : ""}
+            </span>
+            <span
+              data-testid="ws-block-receipts-dropped-count"
+              className={`px-2.5 py-1 rounded-md border font-mono ${
+                blockDroppedCount > 0
+                  ? "bg-amber-950/60 border-amber-700/50 text-amber-300"
+                  : "bg-surface-2 border-border text-muted"
+              }`}
+            >
+              Dropped: {blockDroppedCount}
+            </span>
+            <span
+              data-testid="ws-block-receipts-pending-count"
+              className="px-2.5 py-1 rounded-md bg-surface-2 border border-border font-mono text-muted"
+            >
+              Queue: {blockPendingCount}
+            </span>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 items-end">
+          <div className="flex flex-col gap-1">
+            <label
+              htmlFor="ws-block-receipts-max-queue-input"
+              className="text-xs font-medium text-muted"
+            >
+              Max Queue Size (backpressure cap)
+            </label>
+            <input
+              id="ws-block-receipts-max-queue-input"
+              data-testid="ws-block-receipts-max-queue-input"
+              type="number"
+              min={1}
+              value={blockMaxQueueInput}
+              onChange={(e) => setBlockMaxQueueInput(e.target.value)}
+              disabled={blockStreamStatus === "streaming" || blockStreamStatus === "starting"}
+              className="bg-surface-2 border border-border rounded-lg px-3 py-1.5 text-xs font-mono text-fg focus:outline-none focus:border-gold disabled:opacity-60"
+            />
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label
+              htmlFor="ws-block-receipts-concurrency-input"
+              className="text-xs font-medium text-muted"
+            >
+              Receipt Concurrency
+            </label>
+            <input
+              id="ws-block-receipts-concurrency-input"
+              data-testid="ws-block-receipts-concurrency-input"
+              type="number"
+              min={1}
+              value={blockConcurrencyInput}
+              onChange={(e) => setBlockConcurrencyInput(e.target.value)}
+              disabled={blockStreamStatus === "streaming" || blockStreamStatus === "starting"}
+              className="bg-surface-2 border border-border rounded-lg px-3 py-1.5 text-xs font-mono text-fg focus:outline-none focus:border-gold disabled:opacity-60"
+            />
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label
+              htmlFor="ws-block-receipts-overflow-select"
+              className="text-xs font-medium text-muted"
+            >
+              Overflow Policy
+            </label>
+            <select
+              id="ws-block-receipts-overflow-select"
+              data-testid="ws-block-receipts-overflow-select"
+              value={blockOverflowPolicy}
+              onChange={(e) =>
+                setBlockOverflowPolicy(e.target.value as WsBackpressureOverflowPolicy)
+              }
+              disabled={blockStreamStatus === "streaming" || blockStreamStatus === "starting"}
+              className="bg-surface-2 border border-border rounded-lg px-3 py-1.5 text-xs font-mono text-fg focus:outline-none focus:border-gold disabled:opacity-60"
+            >
+              <option value="drop-oldest">drop-oldest</option>
+              <option value="drop-newest">drop-newest</option>
+              <option value="error">error</option>
+            </select>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {blockStreamStatus === "streaming" || blockStreamStatus === "starting" ? (
+              <button
+                type="button"
+                data-testid="ws-block-receipts-toggle-btn"
+                onClick={() => void handleStopBlockReceiptStream()}
+                className="flex-1 px-3 py-1.5 bg-red-950/60 hover:bg-red-900/70 text-red-200 border border-red-700/60 font-semibold rounded-lg text-xs transition-colors whitespace-nowrap"
+              >
+                Stop Stream
+              </button>
+            ) : (
+              <button
+                type="button"
+                data-testid="ws-block-receipts-toggle-btn"
+                onClick={() => void handleStartBlockReceiptStream()}
+                disabled={!isConnected}
+                className="flex-1 px-3 py-1.5 bg-gold hover:bg-gold/90 text-bg font-semibold rounded-lg text-xs transition-colors disabled:opacity-50 whitespace-nowrap"
+              >
+                Start Block+Receipt Stream
+              </button>
+            )}
+            <button
+              type="button"
+              data-testid="ws-block-receipts-clear-btn"
+              onClick={handleClearBlockReceipts}
+              className="px-3 py-1.5 text-xs font-medium rounded-lg bg-surface-2 hover:bg-border border border-border text-muted hover:text-fg transition-colors"
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+
+        {blockStreamError && (
+          <div
+            data-testid="ws-block-receipts-error"
+            className="bg-red-950/40 border border-red-700/50 rounded-lg p-3 text-xs font-mono text-red-200"
+          >
+            {blockStreamError}
+          </div>
+        )}
+
+        {blockReceiptEntries.length === 0 ? (
+          <div
+            data-testid="ws-block-receipts-empty"
+            className="bg-surface-2/40 border border-border/60 rounded-lg p-6 text-center text-xs text-muted"
+          >
+            Connect to WebSocket and click <strong>Start Block+Receipt Stream</strong> to stream enriched blocks with transaction receipts.
+          </div>
+        ) : (
+          <div
+            data-testid="ws-block-receipts-list"
+            className="flex flex-col gap-2.5 max-h-96 overflow-y-auto pr-1"
+          >
+            {blockReceiptEntries.map((item) => (
+              <div
+                key={item.uid}
+                data-testid="ws-block-receipt-item"
+                className="bg-surface-2 rounded-lg border border-border p-3 flex flex-col gap-2 text-xs"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="px-2 py-0.5 rounded bg-gold/10 text-gold border border-gold/20 font-mono font-semibold">
+                      Height #{item.heightLabel}
+                    </span>
+                    <span className="font-mono text-fg break-all">{item.blockHash}</span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono">
+                    <span className="px-2 py-0.5 rounded bg-surface border border-border text-fg">
+                      {item.receiptCount} receipt{item.receiptCount === 1 ? "" : "s"}
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-emerald-950/60 border border-emerald-700/50 text-emerald-300">
+                      {item.succeededCount} ok
+                    </span>
+                    {item.failedCount > 0 && (
+                      <span className="px-2 py-0.5 rounded bg-red-950/60 border border-red-700/50 text-red-300">
+                        {item.failedCount} failed
+                      </span>
+                    )}
+                    {item.droppedBeforeThis > 0 && (
+                      <span className="px-2 py-0.5 rounded bg-amber-950/60 border border-amber-700/50 text-amber-300">
+                        +{item.droppedBeforeThis} dropped before
+                      </span>
+                    )}
+                  </div>
+                </div>
+                {item.receiptCount > 0 && (
+                  <pre className="bg-surface p-2.5 rounded border border-border/60 text-[11px] font-mono text-muted overflow-x-auto max-h-40">
+                    {item.receiptsJson}
+                  </pre>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Live Event Stream Card */}

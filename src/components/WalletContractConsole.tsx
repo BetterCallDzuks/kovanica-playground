@@ -5,6 +5,7 @@ import {
   KOVANICA_COIN_TYPE,
 } from "kovanica-sdk";
 import { AccountHistoryWatchOnlyPanel } from "./AccountHistoryWatchOnlyPanel";
+import { StorageSlotStudioPanel } from "./StorageSlotStudioPanel";
 import {
   AIRGAP_ENVELOPE_PREFIX,
   buildEscrowCreateCall,
@@ -3805,6 +3806,9 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
           </div>
         )}
       </div>
+
+      {/* Storage Slot Deriver Studio */}
+      <StorageSlotStudioPanel client={client} />
 
       {/* Account History & Watch-Only Inspector */}
       <AccountHistoryWatchOnlyPanel

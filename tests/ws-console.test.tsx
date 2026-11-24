@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import {
   deriveWsUrl,
   WsSubscriptionConsole,
@@ -10,6 +10,7 @@ import {
   concat,
   encodeBincodeStringVec,
   hexToBytes,
+  type BlockReceiptsRpcClient,
 } from "../src/wallet-interop";
 
 class MockWebSocket implements WebSocketLike {
@@ -428,5 +429,199 @@ describe("WsSubscriptionConsole", () => {
       'Payload did not match "name" schema',
     );
     expect(items[0].textContent).toContain("0xdeadbeef");
+  });
+
+  it("streams enriched blocks + receipts via subscribeNewBlocksWithReceipts and displays receipt status summary", async () => {
+    const getTransactionReceipt = vi.fn().mockImplementation(async (hash: string) => {
+      if (hash === "0xtx1") {
+        return {
+          transactionHash: "0xtx1",
+          blockHash: "0xblock100",
+          blockNumber: 100n,
+          transactionIndex: 0n,
+          status: 1,
+          success: true,
+          gasUsed: 21_000n,
+        };
+      }
+      return {
+        transactionHash: hash,
+        blockHash: "0xblock100",
+        blockNumber: 100n,
+        transactionIndex: 1n,
+        status: 0,
+        success: false,
+        gasUsed: 45_000n,
+      };
+    });
+    const mockRpcClient: BlockReceiptsRpcClient = { getTransactionReceipt };
+
+    render(
+      <WsSubscriptionConsole
+        rpcUrl="http://127.0.0.1:8545/rpc"
+        rpcClient={mockRpcClient}
+        WebSocketImpl={MockWebSocket}
+      />,
+    );
+
+    // Connect WebSocket
+    fireEvent.click(screen.getByTestId("ws-connect-btn"));
+    const ws = MockWebSocket.instances[0];
+    await act(async () => {
+      ws.simulateOpen();
+    });
+
+    // Start Block+Receipt Stream
+    fireEvent.click(screen.getByTestId("ws-block-receipts-toggle-btn"));
+    expect(ws.sentMessages).toHaveLength(1);
+    expect(JSON.parse(ws.sentMessages[0])).toEqual({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "kovanica_subscribe",
+      params: ["newHeads"],
+    });
+
+    // Acknowledge newHeads subscription
+    await act(async () => {
+      ws.simulateMessage({ jsonrpc: "2.0", id: 1, result: "0xsub-blk-receipts" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("ws-block-receipts-status").textContent).toContain("streaming");
+    });
+
+    // Push a block head containing two transaction hashes
+    await act(async () => {
+      ws.simulateMessage({
+        jsonrpc: "2.0",
+        method: "kovanica_subscription",
+        params: {
+          subscription: "0xsub-blk-receipts",
+          result: {
+            number: 100,
+            hash: "0xblock100",
+            transactions: ["0xtx1", "0xtx2"],
+          },
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.getAllByTestId("ws-block-receipt-item")).toHaveLength(1);
+    });
+
+    const item = screen.getAllByTestId("ws-block-receipt-item")[0];
+    expect(item.textContent).toContain("Height #100");
+    expect(item.textContent).toContain("0xblock100");
+    expect(item.textContent).toContain("2 receipts");
+    expect(item.textContent).toContain("1 ok");
+    expect(item.textContent).toContain("1 failed");
+    expect(screen.getByTestId("ws-block-receipts-dropped-count").textContent).toBe("Dropped: 0");
+
+    // Stop stream sends kovanica_unsubscribe
+    fireEvent.click(screen.getByTestId("ws-block-receipts-toggle-btn"));
+    expect(ws.sentMessages).toHaveLength(2);
+    expect(JSON.parse(ws.sentMessages[1])).toEqual({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "kovanica_unsubscribe",
+      params: ["0xsub-blk-receipts"],
+    });
+    await act(async () => {
+      ws.simulateMessage({ jsonrpc: "2.0", id: 2, result: true });
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("ws-block-receipts-status").textContent).toBe("idle");
+    });
+  });
+
+  it("enforces configurable maxQueueSize backpressure cap and increments droppedCount counter", async () => {
+    let releaseFirstReceipt!: () => void;
+    const firstReceiptDeferred = new Promise<void>((resolve) => {
+      releaseFirstReceipt = resolve;
+    });
+
+    const getTransactionReceipt = vi.fn().mockImplementation(async (hash: string) => {
+      if (hash === "0xtx-slow") {
+        await firstReceiptDeferred;
+      }
+      return {
+        transactionHash: hash,
+        blockHash: "0xblock-bp",
+        blockNumber: 200n,
+        transactionIndex: 0n,
+        status: 1,
+        success: true,
+      };
+    });
+    const mockRpcClient: BlockReceiptsRpcClient = { getTransactionReceipt };
+
+    render(
+      <WsSubscriptionConsole
+        rpcUrl="http://127.0.0.1:8545/rpc"
+        rpcClient={mockRpcClient}
+        WebSocketImpl={MockWebSocket}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("ws-connect-btn"));
+    const ws = MockWebSocket.instances[0];
+    await act(async () => {
+      ws.simulateOpen();
+    });
+
+    // Configure maxQueueSize = 1 so rapid bursts trigger backpressure drops
+    fireEvent.change(screen.getByTestId("ws-block-receipts-max-queue-input"), {
+      target: { value: "1" },
+    });
+
+    fireEvent.click(screen.getByTestId("ws-block-receipts-toggle-btn"));
+    await act(async () => {
+      ws.simulateMessage({ jsonrpc: "2.0", id: 1, result: "0xsub-bp" });
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("ws-block-receipts-status").textContent).toContain("streaming");
+    });
+
+    // Block 1 occupies the worker; Block 2 fills queue (size 1); Block 3 evicts Block 2 -> droppedCount = 1
+    await act(async () => {
+      ws.simulateMessage({
+        jsonrpc: "2.0",
+        method: "kovanica_subscription",
+        params: {
+          subscription: "0xsub-bp",
+          result: { number: 201, hash: "0xblock201", transactions: ["0xtx-slow"] },
+        },
+      });
+      ws.simulateMessage({
+        jsonrpc: "2.0",
+        method: "kovanica_subscription",
+        params: {
+          subscription: "0xsub-bp",
+          result: { number: 202, hash: "0xblock202", transactions: ["0xtx-2"] },
+        },
+      });
+      ws.simulateMessage({
+        jsonrpc: "2.0",
+        method: "kovanica_subscription",
+        params: {
+          subscription: "0xsub-bp",
+          result: { number: 203, hash: "0xblock203", transactions: ["0xtx-3"] },
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("ws-block-receipts-dropped-count").textContent).toBe("Dropped: 1");
+    });
+
+    // Unblock Block 1 so Block 1 & Block 3 complete cleanly
+    await act(async () => {
+      releaseFirstReceipt();
+    });
+
+    await waitFor(() => {
+      expect(screen.getAllByTestId("ws-block-receipt-item")).toHaveLength(2);
+    });
   });
 });
