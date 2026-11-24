@@ -20,6 +20,7 @@ import {
   computeFeeRecommendations,
   computeTransferTransactionSigningHash,
   concat,
+  createWatchOnlyAccount,
   decodeAirgapTxEnvelope,
   decodeContractLog,
   decodeContractStateHex,
@@ -43,9 +44,11 @@ import {
   estimateContractCallBatch,
   executeJsonRpcReadBatch,
   exportContractPresetsJson,
+  fetchAccountTxHistorySummary,
   fetchAndDecodeContractStorageSlot,
   formatAddressForChain,
   generateMnemonic,
+  getAccountTxHistory,
   getContractLogHistory,
   hexToBytes,
   HtlcClient,
@@ -53,6 +56,7 @@ import {
   inspectAnySignedTx,
   inspectRawSignedCallTx,
   inspectRawSignedTransferTx,
+  inspectWatchOnlyAccount,
   isStorageSlotEmpty,
   KovanicaDecodeError,
   MAX_CONTRACT_PRESETS_ITEMS,
@@ -62,6 +66,7 @@ import {
   NameRegistryClient,
   NftClient,
   normalizeAddressList,
+  parseBip44Path,
   parseImportedContractPresetsJson,
   parseMempoolFeeStats,
   peekTransactionVariant,
@@ -81,6 +86,7 @@ import {
   u128le,
   u32le,
   u64le,
+  validateBip44Path,
   validateMnemonic,
   VaultClient,
   verifyCallTransactionSignature,
@@ -2704,6 +2710,114 @@ describe("Ecosystem HD Wallet & Wasmi Contract Interoperability (PRO-53, PRO-48)
         expect(BigInt(result.standardAtoms)).toBeGreaterThanOrEqual(30n);
         expect(BigInt(result.priorityAtoms)).toBeGreaterThanOrEqual(BigInt(result.standardAtoms));
         expect(() => JSON.stringify(result)).not.toThrow();
+      });
+    });
+
+    describe("Watch-Only Account Inspector & Account Tx History Explorer", () => {
+      const goldenMainnet =
+        "kvncschhpna0ex6cz6vl34n4nr4vdxwtey4alj2qa90d0ms73kqspel0nuhe8dag";
+      const goldenTestnet =
+        "tkncschhpna0ex6cz6vl34n4nr4vdxwtey4alj2qa90d0ms73kqspel0nuhe8dag";
+
+      it("inspects valid PRO-21 mainnet and testnet accounts with canSign: false", () => {
+        const mainnetRes = inspectWatchOnlyAccount(goldenMainnet, CHAIN_IDS.MAINNET);
+        expect(mainnetRes.ok).toBe(true);
+        if (mainnetRes.ok) {
+          expect(mainnetRes.account.network).toBe("mainnet");
+          expect(mainnetRes.account.chainId).toBe(1);
+          expect(mainnetRes.account.readOnly).toBe(true);
+          expect(mainnetRes.account.isWatchOnly).toBe(true);
+          expect(mainnetRes.account.canSign).toBe(false);
+          expect(mainnetRes.account.canonicalMainnet).toBe(goldenMainnet);
+          expect(mainnetRes.account.canonicalTestnet).toBe(goldenTestnet);
+        }
+
+        const testnetAuto = inspectWatchOnlyAccount(goldenTestnet);
+        expect(testnetAuto.ok).toBe(true);
+        if (testnetAuto.ok) {
+          expect(testnetAuto.account.network).toBe("testnet");
+          expect(testnetAuto.account.chainId).toBe(2);
+          expect(testnetAuto.account.canSign).toBe(false);
+        }
+
+        // Direct SDK re-export parity
+        expect(createWatchOnlyAccount(goldenMainnet).address).toBe(goldenMainnet);
+      });
+
+      it("rejects empty, legacy hex, malformed, and chain-mismatched watch-only inputs", () => {
+        expect(inspectWatchOnlyAccount("").ok).toBe(false);
+        expect(inspectWatchOnlyAccount("0x" + "11".repeat(32), CHAIN_IDS.DEVNET).ok).toBe(false);
+        expect(inspectWatchOnlyAccount(goldenTestnet, CHAIN_IDS.MAINNET).ok).toBe(false);
+        expect(inspectWatchOnlyAccount("not-an-address").ok).toBe(false);
+      });
+
+      it("re-exports parseBip44Path and validateBip44Path from kovanica-sdk", () => {
+        const parsed = parseBip44Path("m/44'/3007'/0'/0'/0'", { requireAllHardened: true });
+        expect(parsed.coinType).toBe(3007);
+        expect(parsed.allHardened).toBe(true);
+        expect(validateBip44Path("m/44'/3007'/0'/0'/0'", { requireAllHardened: true }).valid).toBe(true);
+        expect(validateBip44Path("m/44'/60'/0'/0/0").valid).toBe(false);
+      });
+
+      it("fetches and formats lossless account tx history with direction filtering and pagination", async () => {
+        const seenParams: unknown[] = [];
+        const summary = await fetchAccountTxHistorySummary(
+          {
+            getTransactionHistory: async (params) => {
+              seenParams.push(params);
+              if (!params.cursor) {
+                return {
+                  entries: [
+                    {
+                      hash: "0x" + "ab".repeat(32),
+                      height: "0x100",
+                      timestamp: "1750000000000",
+                      from: goldenMainnet,
+                      to: goldenTestnet,
+                      amount: "9007199254740993000", // > Number.MAX_SAFE_INTEGER
+                      fee: "15000",
+                      kind: "transfer",
+                      status: "success",
+                    },
+                  ],
+                  next_cursor: "next-cur-1",
+                };
+              }
+              return { entries: [], next_cursor: null };
+            },
+          },
+          {
+            address: goldenMainnet,
+            direction: "received",
+            limit: 10,
+            maxPages: 1,
+          },
+        );
+
+        expect(seenParams).toEqual([
+          { address: goldenMainnet, direction: "received", limit: 10 },
+        ]);
+        expect(summary.direction).toBe("received");
+        expect(summary.pagesFetched).toBe(1);
+        expect(summary.hasMore).toBe(true);
+        expect(summary.nextCursor).toBe("next-cur-1");
+        expect(summary.items).toHaveLength(1);
+        expect(summary.items[0].height).toBe("256");
+        expect(summary.items[0].amountAtoms).toBe("9007199254740993000");
+        expect(summary.items[0].amountKvnc).toBe("9007199254.740993");
+        expect(summary.items[0].feeAtoms).toBe("15000");
+        expect(summary.items[0].feeKvnc).toBe("0.000015");
+        expect(() => JSON.stringify(summary)).not.toThrow();
+
+        // Direct SDK re-export parity
+        const rawRes = await getAccountTxHistory(
+          {
+            getTransactionHistory: async () => ({ entries: [], next_cursor: null }),
+          },
+          { address: goldenMainnet, direction: "all" },
+        );
+        expect(rawRes.items).toEqual([]);
+        expect(rawRes.hasMore).toBe(false);
       });
     });
   });

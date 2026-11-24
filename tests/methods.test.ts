@@ -10,23 +10,30 @@ import {
   computeFeeRecommendations,
   computeTransferTransactionSigningHash,
   createFailoverClient,
+  createWatchOnlyAccount,
   decodeAirgapTxEnvelope,
   decodeSignedCallTransaction,
   decodeSignedTransactionAuto,
   decodeSignedTransferTransaction,
+  DEFAULT_ACCOUNT_TX_HISTORY_LIMIT,
+  DEFAULT_ACCOUNT_TX_HISTORY_MAX_PAGES,
   dryRunBatchCalls,
   encodeAirgapTxEnvelope,
   EscrowClient,
   estimateTxFeeWithBuffer,
   FailoverHttpTransport,
+  getAccountTxHistory,
   getContractLogHistory,
   HtlcClient,
   inspectAddress,
+  MAX_ACCOUNT_TX_HISTORY_LIMIT,
   MAX_JSONRPC_BATCH_SIZE,
   MultisigClient,
   NameRegistryClient,
   NftClient,
   normalizeAddressList,
+  parseAccountTxHistoryEntry,
+  parseBip44Path,
   parseMempoolFeeStats,
   peekTransactionVariant,
   probeRpcNode,
@@ -35,6 +42,7 @@ import {
   signTransferTransaction,
   subscribeContractEvents,
   TokenClient,
+  validateBip44Path,
   VaultClient,
   verifyCallTransactionSignature,
   verifyEd25519,
@@ -50,23 +58,30 @@ import {
   computeFeeRecommendations as interopComputeFeeRecommendations,
   computeTransferTransactionSigningHash as interopComputeTransferTransactionSigningHash,
   createFailoverClient as interopCreateFailoverClient,
+  createWatchOnlyAccount as interopCreateWatchOnlyAccount,
   decodeAirgapTxEnvelope as interopDecodeAirgapTxEnvelope,
   decodeSignedCallTransaction as interopDecodeSignedCallTransaction,
   decodeSignedTransactionAuto as interopDecodeSignedTransactionAuto,
   decodeSignedTransferTransaction as interopDecodeSignedTransferTransaction,
+  DEFAULT_ACCOUNT_TX_HISTORY_LIMIT as interopDefaultAccountTxHistoryLimit,
+  DEFAULT_ACCOUNT_TX_HISTORY_MAX_PAGES as interopDefaultAccountTxHistoryMaxPages,
   dryRunBatchCalls as interopDryRunBatchCalls,
   encodeAirgapTxEnvelope as interopEncodeAirgapTxEnvelope,
   EscrowClient as interopEscrowClient,
   estimateTxFeeWithBuffer as interopEstimateTxFeeWithBuffer,
   FailoverHttpTransport as interopFailoverHttpTransport,
+  getAccountTxHistory as interopGetAccountTxHistory,
   getContractLogHistory as interopGetContractLogHistory,
   HtlcClient as interopHtlcClient,
   inspectAddress as interopInspectAddress,
+  MAX_ACCOUNT_TX_HISTORY_LIMIT as interopMaxAccountTxHistoryLimit,
   MAX_JSONRPC_BATCH_SIZE as interopMaxJsonRpcBatchSize,
   MultisigClient as interopMultisigClient,
   NameRegistryClient as interopNameRegistryClient,
   NftClient as interopNftClient,
   normalizeAddressList as interopNormalizeAddressList,
+  parseAccountTxHistoryEntry as interopParseAccountTxHistoryEntry,
+  parseBip44Path as interopParseBip44Path,
   parseMempoolFeeStats as interopParseMempoolFeeStats,
   peekTransactionVariant as interopPeekTransactionVariant,
   probeRpcNode as interopProbeRpcNode,
@@ -75,6 +90,7 @@ import {
   signTransferTransaction as interopSignTransferTransaction,
   subscribeContractEvents as interopSubscribeContractEvents,
   TokenClient as interopTokenClient,
+  validateBip44Path as interopValidateBip44Path,
   VaultClient as interopVaultClient,
   verifyCallTransactionSignature as interopVerifyCallTransactionSignature,
   verifyEd25519 as interopVerifyEd25519,
@@ -89,7 +105,7 @@ describe("Immutable SDK Pin & Traceability", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
     const pinnedSha = pkg?.kovanicaSdk?.testedRevision;
 
-    expect(pinnedSha).toBe("7e267ab595515badcdc03c82c8eed40c2a1a2e2e");
+    expect(pinnedSha).toBe("9dde747d6f8e7344ebea9966c164c15a8b7ba77c");
     expect(pinnedSha).toMatch(/^[0-9a-f]{40}$/);
 
     const ciWorkflow = fs.readFileSync(path.join(rootDir, ".github/workflows/ci.yml"), "utf8");
@@ -152,6 +168,11 @@ describe("Immutable SDK Pin & Traceability", () => {
     expect(distContent).toContain("parseMempoolFeeStats");
     expect(distContent).toContain("computeFeeRecommendations");
     expect(distContent).toContain("getMempoolStats");
+    expect(distContent).toContain("getAccountTxHistory");
+    expect(distContent).toContain("parseAccountTxHistoryEntry");
+    expect(distContent).toContain("createWatchOnlyAccount");
+    expect(distContent).toContain("parseBip44Path");
+    expect(distContent).toContain("validateBip44Path");
 
     expect(typeof readContractStorage).toBe("function");
     expect(typeof dryRunBatchCalls).toBe("function");
@@ -211,6 +232,22 @@ describe("Immutable SDK Pin & Traceability", () => {
     expect(typeof computeFeeRecommendations).toBe("function");
     expect(interopParseMempoolFeeStats).toBe(parseMempoolFeeStats);
     expect(interopComputeFeeRecommendations).toBe(computeFeeRecommendations);
+    expect(typeof getAccountTxHistory).toBe("function");
+    expect(typeof parseAccountTxHistoryEntry).toBe("function");
+    expect(typeof createWatchOnlyAccount).toBe("function");
+    expect(typeof parseBip44Path).toBe("function");
+    expect(typeof validateBip44Path).toBe("function");
+    expect(DEFAULT_ACCOUNT_TX_HISTORY_LIMIT).toBe(20);
+    expect(MAX_ACCOUNT_TX_HISTORY_LIMIT).toBe(100);
+    expect(DEFAULT_ACCOUNT_TX_HISTORY_MAX_PAGES).toBe(10);
+    expect(interopGetAccountTxHistory).toBe(getAccountTxHistory);
+    expect(interopParseAccountTxHistoryEntry).toBe(parseAccountTxHistoryEntry);
+    expect(interopCreateWatchOnlyAccount).toBe(createWatchOnlyAccount);
+    expect(interopParseBip44Path).toBe(parseBip44Path);
+    expect(interopValidateBip44Path).toBe(validateBip44Path);
+    expect(interopDefaultAccountTxHistoryLimit).toBe(DEFAULT_ACCOUNT_TX_HISTORY_LIMIT);
+    expect(interopMaxAccountTxHistoryLimit).toBe(MAX_ACCOUNT_TX_HISTORY_LIMIT);
+    expect(interopDefaultAccountTxHistoryMaxPages).toBe(DEFAULT_ACCOUNT_TX_HISTORY_MAX_PAGES);
 
     // Assert all 7 typed contract facades + MAX_JSONRPC_BATCH_SIZE are exported and re-exported identically
     expect(MAX_JSONRPC_BATCH_SIZE).toBe(32);
