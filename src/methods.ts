@@ -246,6 +246,56 @@ export const ALLOWLISTED_METHODS: MethodDefinition[] = [
     },
   },
   {
+    method: "kovanica_getBaseFee",
+    category: "Transaction",
+    description: "Returns live EIP-1559 dynamic base fee per byte and storage deposit pricing (Wave B).",
+    params: [],
+    execute: async (client, _params, options) => {
+      return client.getBaseFee(options);
+    },
+  },
+  {
+    method: "kovanica_getStorageDeposit",
+    category: "Account",
+    description: "Returns refundable storage deposit accounting for a contract address (Wave B).",
+    params: [
+      {
+        name: "contract",
+        label: "Contract Address",
+        type: "address",
+        required: true,
+        placeholder: "kvnc...dag",
+      },
+    ],
+    execute: async (client, params, options) => {
+      return client.getStorageDeposit(params.contract, options);
+    },
+  },
+  {
+    method: "kovanica_getSessionKey",
+    category: "Account",
+    description: "Looks up a persisted scoped session key policy for (owner, session_pubkey) (Wave C).",
+    params: [
+      {
+        name: "owner",
+        label: "Owner Address",
+        type: "address",
+        required: true,
+        placeholder: "kvnc...dag",
+      },
+      {
+        name: "sessionPubkey",
+        label: "Session Pubkey (0x hex32)",
+        type: "hex32",
+        required: true,
+        placeholder: "0x...",
+      },
+    ],
+    execute: async (client, params, options) => {
+      return client.getSessionKey(params.owner, params.sessionPubkey, options);
+    },
+  },
+  {
     method: "kovanica_getValidators",
     category: "Staking",
     description: "Returns all registered validators, active status, and bonded stakes. Legacy (Mysticeti) chain 3 only; hybrid chains 1 & 2 reject with -32600 (L1 #272).",
