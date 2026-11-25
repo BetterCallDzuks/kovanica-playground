@@ -15,6 +15,7 @@ import {
 } from "./methods";
 import { WalletContractConsole } from "./components/WalletContractConsole";
 import { WsSubscriptionConsole } from "./components/WsSubscriptionConsole";
+import { WaveARwaStudio } from "./components/WaveARwaStudio";
 
 // Safe JSON serializer that handles BigInt without throwing
 function formatJson(data: unknown): string {
@@ -37,7 +38,7 @@ export default function App() {
   // Target Network & Endpoint
   const [selectedChainId, setSelectedChainId] = useState<number>(CHAIN_IDS.TESTNET);
   const [rpcUrl, setRpcUrl] = useState<string>("http://127.0.0.1:8545/rpc");
-  const [mainTab, setMainTab] = useState<"rpc" | "wallet" | "ws">("rpc");
+  const [mainTab, setMainTab] = useState<"rpc" | "wallet" | "ws" | "studio">("rpc");
   const [connectedNodeChainId, setConnectedNodeChainId] = useState<number | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [miningInfo, setMiningInfo] = useState<MiningInfo | null>(null);
@@ -622,6 +623,23 @@ export default function App() {
           >
             WebSocket Event Stream
           </button>
+          <button
+            type="button"
+            data-testid="tab-wave-a-studio"
+            onClick={() => setMainTab("studio")}
+            className={`px-4 py-2 text-xs font-semibold rounded-lg transition-colors ${
+              mainTab === "studio"
+                ? "bg-gold text-bg font-bold shadow-sm"
+                : "bg-surface text-muted hover:text-fg border border-border"
+            }`}
+          >
+            Wave A–D &amp; RWA Studio
+          </button>
+        </div>
+
+        {/* Wave A-D & RWA Studio */}
+        <div className={mainTab === "studio" ? "block" : "hidden"}>
+          <WaveARwaStudio />
         </div>
 
         {/* HD Wallet & Wasmi Contract Console (PRO-53 & PRO-48) */}
