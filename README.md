@@ -160,19 +160,20 @@ npm run build
 
 ## KVP & RFC Standards Reference
 
-> Kovanica protocol proposals use **`KVP-101`..`KVP-106`** (plus **`KVP-20`** for fungible DEX pairs); the `001`..`008` numbers belong to the companion **`RFC-001`..`RFC-008`** specs.
+> The `001`–`008` numbers belong to the companion **`RFC-001`–`RFC-008`** specs (ordered sequentially below); protocol proposals use **`KVP-101`–`KVP-106`** (plus **`KVP-20`** and **`PRO-21`**).
 
-| Standard | RFC | Name | Purpose |
+| RFC | KVP | Name | Purpose |
 | :--- | :--- | :--- | :--- |
-| **`KVP-20`** | — | Fungible Contract Token | Standard `approve`/`transfer`/`transfer_from` interface for AMM DEX & bridge tokens |
-| **`KVP-101`** | `RFC-001` | Multisig Wallets | M-of-N shared custody & spend proposals (`MultisigClient`) |
-| **`KVP-102`** | `RFC-002` | Native Multi-Asset Tokens | On-chain fungible tokens, balances, transfers & AMM pools (`TokenClient`) |
-| **`KVP-103`** | `RFC-003` | Stealth Addresses | Privacy-preserving one-time stealth addresses |
-| **`KVP-104`** | `RFC-004` | HTLC Atomic Swaps | Hash Time-Locked Contracts (`HtlcClient`) |
-| **`KVP-105`** | `RFC-005` | Time-Lock Vaults | CLTV / CSV vaults & treasury vesting (`VaultClient`) |
-| **`KVP-106`** | `RFC-007` | Real-World Assets (RWA) & Native NFTs | Institutional RWA (`WaveARwaStudio`, allowlist/freeze/coupons) & Native NFTs (`NftClient`) |
-| **`PRO-21`** | — | Canonical Address Format | 64-char `kvnc…dag` (Ed25519 + 29-bit BLAKE3 checksum) |
-| **`RFC-006`** / **`RFC-008`** | `RFC-006` / `008` | Fee Floor & Name Registry | Atoms/byte fee floor + Wave B base fee; On-chain Name Registry (`NameRegistryClient`, no KVP #) |
+| **`RFC-001`** | `KVP-101` | Multisig Wallets | M-of-N shared custody & spend proposals (`MultisigClient`) |
+| **`RFC-002`** | `KVP-102` | Native Multi-Asset Tokens | On-chain fungible tokens, balances, transfers & AMM pools (`TokenClient`) |
+| **`RFC-003`** | `KVP-103` | Stealth Addresses | Privacy-preserving one-time stealth addresses |
+| **`RFC-004`** | `KVP-104` | HTLC Atomic Swaps | Hash Time-Locked Contracts (`HtlcClient`) |
+| **`RFC-005`** | `KVP-105` | Time-Lock Vaults | CLTV / CSV vaults & treasury vesting (`VaultClient`) |
+| **`RFC-006`** | — | Fee Floor & Wave B Base Fee | Atoms/byte fee floor + EIP-1559 dynamic base fee |
+| **`RFC-007`** | `KVP-106` | Real-World Assets (RWA) & Native NFTs | Institutional RWA (`WaveARwaStudio`, allowlist/freeze/coupons) & Native NFTs (`NftClient`) |
+| **`RFC-008`** | — | On-Chain Name Registry | Human-readable name resolution (`NameRegistryClient`; no KVP #) |
+| — | **`KVP-20`** | Fungible Contract Token | Standard `approve`/`transfer`/`transfer_from` interface for AMM DEX & bridge tokens |
+| — | **`PRO-21`** | Canonical Address Format | 64-char `kvnc…dag` (Ed25519 + 29-bit BLAKE3 checksum) |
 
 ---
 
