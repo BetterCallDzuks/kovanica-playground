@@ -3,11 +3,18 @@ import {
   FIXED_FEE_SCHEDULE,
   PREV_DEPLOYED_CONTRACT,
   SignatureScheme,
+  buildApproveAndSwapBatchActions,
   buildBridgeInitCall,
   buildRwaCreateCall,
+  buildScheduledRwaDividendJobCall,
   buildSchedulerCreateJobCall,
+  chunkRwaAllowlistBatches,
+  computeProRataDividends,
+  deriveAmmPoolId,
   deriveTypedAddress,
+  encodeAddress,
   nextBaseFeePerByte,
+  quoteAmmSwapExactIn,
   signBatchTransaction,
 } from "kovanica-sdk";
 
@@ -66,16 +73,58 @@ export function WaveARwaStudio() {
       relayers: [pub],
       threshold: 1,
     });
+    const tokenA = new Uint8Array(32).fill(0x11);
+    const tokenB = new Uint8Array(32).fill(0x22);
+    const ammPoolId = deriveAmmPoolId(tokenA, tokenB);
+    const ammQuote = quoteAmmSwapExactIn({
+      amountIn: 10_000_000n,
+      reserveIn: 1_000_000_000n,
+      reserveOut: 1_000_000_000n,
+      slippageBps: 50,
+    });
+    const ammBatch = buildApproveAndSwapBatchActions({
+      ammContract: pub,
+      poolId: ammPoolId,
+      tokenIn: tokenA,
+      amountIn: 10_000_000n,
+      minOut: ammQuote.minAmountOut,
+    });
+    const holderAddr = encodeAddress(pub);
+    const allowlistBatches = chunkRwaAllowlistBatches({
+      rwaContract: pub,
+      entries: [{ address: holderAddr, allowed: true, kycTier: 2 }],
+    });
+    const couponPlan = computeProRataDividends({
+      totalPayoutAtoms: 1_000_000_000n,
+      holders: [{ address: holderAddr, balance: 1_000n }],
+    });
+    const scheduledDividendBytes = buildScheduledRwaDividendJobCall({
+      rwaContract: pub,
+      payoutToken: "KVNC",
+      totalPayoutAtoms: 1_000_000_000n,
+      epochId: 1,
+      memo: "Q4 Coupon",
+      executeAfterHeight: 100_000n,
+      intervalHeights: 21_600n,
+      maxRuns: 12,
+      bountyPerRun: 50_000_000n,
+    });
 
     setOutput(
       JSON.stringify(
         {
+          sdkVersion: "v0.9.0",
           batchTxBytes: batch.rawBytes.length,
           batchFeeAtoms: (FIXED_FEE_SCHEDULE.deploy + FIXED_FEE_SCHEDULE.rwa_create).toString(),
           eip1559NextBaseFeeAtFullBlock: nextBase.toString(),
           passkeyAddressHex: `0x${Buffer.from(passkeyAddr).toString("hex").slice(0, 16)}...`,
           schedulerCallBytes: schedBytes.length,
           bridgeInitBytes: bridgeBytes.length,
+          ammSwapQuoteOut: ammQuote.amountOut.toString(),
+          ammBatchActionCount: ammBatch.length,
+          rwaAllowlistBatchCount: allowlistBatches.length,
+          rwaDividendDistributedAtoms: couponPlan.distributedAtoms.toString(),
+          scheduledDividendJobBytes: scheduledDividendBytes.length,
         },
         null,
         2,
