@@ -17,6 +17,37 @@ import { WalletContractConsole } from "./components/WalletContractConsole";
 import { WsSubscriptionConsole } from "./components/WsSubscriptionConsole";
 import { WaveARwaStudio } from "./components/WaveARwaStudio";
 
+const ECOSYSTEM_LINKS = [
+  { label: "kovanica.online", href: "https://kovanica.online" },
+  { label: "testnet.kovanica.online", href: "https://testnet.kovanica.online" },
+  { label: "Explorer", href: "https://testnet.kovanica.online/explorer" },
+  { label: "Wallet", href: "https://testnet.kovanica.online/wallet" },
+  { label: "Swap & Pools", href: "https://testnet.kovanica.online/swap" },
+  { label: "RWA", href: "https://testnet.kovanica.online/rwa" },
+  { label: "Docs", href: "https://docs.kovanica.online" },
+] as const;
+
+const RPC_PRESETS = [
+  {
+    id: "testnet",
+    label: "Testnet RPC",
+    url: "https://rpc-testnet.kovanica.online/rpc",
+    chainId: CHAIN_IDS.TESTNET,
+  },
+  {
+    id: "mainnet",
+    label: "Mainnet RPC (Read-Only)",
+    url: "https://rpc.kovanica.online/rpc",
+    chainId: CHAIN_IDS.MAINNET,
+  },
+  {
+    id: "local",
+    label: "Local 127.0.0.1:8545",
+    url: "http://127.0.0.1:8545/rpc",
+    chainId: null,
+  },
+] as const;
+
 // Safe JSON serializer that handles BigInt without throwing
 function formatJson(data: unknown): string {
   if (data === undefined) return "undefined";
@@ -242,6 +273,14 @@ export default function App() {
     setRpcUrl(newUrl);
   };
 
+  // Apply a 1-click RPC preset and align target chain if specified
+  const handleApplyRpcPreset = (url: string, chainId: number | null) => {
+    handleEndpointChange(url);
+    if (chainId !== null && chainId !== selectedChainId) {
+      handleNetworkChange(chainId);
+    }
+  };
+
   // Cleanup any in-flight probes or method calls on unmount
   useEffect(() => {
     return () => {
@@ -444,6 +483,25 @@ export default function App() {
           </div>
         </div>
 
+        {/* Ecosystem Switcher */}
+        <nav
+          aria-label="Kovanica Ecosystem"
+          data-testid="header-ecosystem-links"
+          className="flex flex-wrap items-center gap-1.5 text-xs"
+        >
+          {ECOSYSTEM_LINKS.map((item) => (
+            <a
+              key={item.href}
+              href={item.href}
+              target="_blank"
+              rel="noreferrer"
+              className="px-2.5 py-1 rounded-md bg-surface-2 hover:bg-border border border-border text-muted hover:text-fg transition-colors whitespace-nowrap"
+            >
+              {item.label}
+            </a>
+          ))}
+        </nav>
+
         {/* Global Connection Status Pill */}
         <div className="flex items-center gap-3 text-xs">
           <div className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-surface-2 border border-border">
@@ -535,6 +593,30 @@ export default function App() {
                   Local Default
                 </button>
               </div>
+              <div
+                className="mt-2 flex flex-wrap items-center gap-1.5"
+                data-testid="rpc-preset-bar"
+              >
+                <span className="text-[11px] text-muted mr-1">Presets:</span>
+                {RPC_PRESETS.map((preset) => {
+                  const isActive = rpcUrl === preset.url;
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      data-testid={`rpc-preset-${preset.id}`}
+                      onClick={() => handleApplyRpcPreset(preset.url, preset.chainId)}
+                      className={`px-2.5 py-1 text-[11px] rounded-md border transition-colors ${
+                        isActive
+                          ? "bg-gold/15 border-gold/50 text-gold font-semibold"
+                          : "bg-surface-2 hover:bg-border border-border text-muted hover:text-fg"
+                      }`}
+                    >
+                      {preset.label}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           </div>
         </section>
@@ -586,7 +668,7 @@ export default function App() {
         )}
 
         {/* Navigation Tabs */}
-        <div className="flex items-center gap-2 border-b border-border pb-3">
+        <div className="flex flex-wrap items-center gap-2 border-b border-border pb-3">
           <button
             type="button"
             data-testid="tab-rpc-explorer"
@@ -638,22 +720,34 @@ export default function App() {
         </div>
 
         {/* Wave A-D & RWA Studio */}
-        <div className={mainTab === "studio" ? "block" : "hidden"}>
+        <div
+          hidden={mainTab !== "studio"}
+          className={mainTab === "studio" ? "block" : "hidden"}
+        >
           <WaveARwaStudio />
         </div>
 
         {/* HD Wallet & Wasmi Contract Console (PRO-53 & PRO-48) */}
-        <div className={mainTab === "wallet" ? "block" : "hidden"}>
+        <div
+          hidden={mainTab !== "wallet"}
+          className={mainTab === "wallet" ? "block" : "hidden"}
+        >
           <WalletContractConsole client={client} selectedChainId={selectedChainId} rpcUrl={rpcUrl} />
         </div>
 
         {/* WebSocket Event Stream Console */}
-        <div className={mainTab === "ws" ? "block" : "hidden"}>
+        <div
+          hidden={mainTab !== "ws"}
+          className={mainTab === "ws" ? "block" : "hidden"}
+        >
           <WsSubscriptionConsole rpcUrl={rpcUrl} rpcClient={client} />
         </div>
 
         {/* Multi-Column Layout (RPC Explorer & Node Diagnostics) */}
-        <div className={`grid grid-cols-1 lg:grid-cols-12 gap-6 items-start ${mainTab === "rpc" ? "block" : "hidden"}`}>
+        <div
+          hidden={mainTab !== "rpc"}
+          className={`grid-cols-1 lg:grid-cols-12 gap-6 items-start ${mainTab === "rpc" ? "grid" : "hidden"}`}
+        >
           {/* Main Column: RPC Method Explorer (7 cols) */}
           <section className="lg:col-span-7 flex flex-col gap-6">
             <div className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-5">
@@ -1028,15 +1122,32 @@ export default function App() {
         <div>
           <span data-testid="footer-currency-label">Kovanica Layer-1 Blockchain &copy; 2026. KVNC (9 decimals).</span>
         </div>
+        <nav
+          aria-label="Kovanica Ecosystem Footer"
+          data-testid="footer-ecosystem-links"
+          className="flex flex-wrap items-center gap-3"
+        >
+          {ECOSYSTEM_LINKS.map((item) => (
+            <a
+              key={item.href}
+              href={item.href}
+              target="_blank"
+              rel="noreferrer"
+              className="text-muted hover:text-fg transition-colors"
+            >
+              {item.label}
+            </a>
+          ))}
+        </nav>
         <div className="flex items-center gap-4">
           <span>Target Block: 4 s | GHOSTDAG K: 5</span>
           <a
-            href="https://github.com/KovanicaDAG/kovanica"
+            href="https://github.com/BetterCallDzuks/kovanica-playground"
             target="_blank"
             rel="noreferrer"
             className="text-gold hover:underline"
           >
-            kovanica on GitHub
+            BetterCallDzuks/kovanica-playground
           </a>
         </div>
       </footer>

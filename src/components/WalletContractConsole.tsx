@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { memo, useState, useMemo } from "react";
 import {
   parseKvnc,
   type KovanicaClient,
@@ -82,25 +82,93 @@ interface Props {
   rpcUrl?: string;
 }
 
+type WalletSubTabId =
+  | "hd-signer"
+  | "contracts-codegen"
+  | "storage-logs"
+  | "verify-diagnostics";
+
+type ContractCallType =
+  | "token_transfer"
+  | "vault_create"
+  | "name_register"
+  | "htlc_create"
+  | "nft_mint"
+  | "escrow_create";
+
+interface SignedEnvelopeState {
+  sighashHex: string;
+  signatureHex: string;
+  rawTxHex: string;
+  txSize: number;
+}
+
+const WALLET_SUBTABS: readonly {
+  id: WalletSubTabId;
+  label: string;
+  testId: string;
+}[] = [
+  { id: "hd-signer", label: "HD Wallet & Signer", testId: "wallet-subtab-hd-signer" },
+  {
+    id: "contracts-codegen",
+    label: "Contracts & Codegen",
+    testId: "wallet-subtab-contracts-codegen",
+  },
+  { id: "storage-logs", label: "Storage & Logs", testId: "wallet-subtab-storage-logs" },
+  {
+    id: "verify-diagnostics",
+    label: "Verification & Diagnostics",
+    testId: "wallet-subtab-verify-diagnostics",
+  },
+];
+
+const GROUP_TOOL_RAILS: Record<
+  WalletSubTabId,
+  readonly { label: string; targetTestId: string }[]
+> = {
+  "hd-signer": [
+    { label: "HD Wallet", targetTestId: "hd-wallet-panel" },
+    { label: "Native Transfer", targetTestId: "native-transfer-signer-panel" },
+    { label: "Universal & Air-Gap", targetTestId: "universal-tx-airgap-panel" },
+    { label: "Mempool Fee Tiers", targetTestId: "mempool-fee-tier-panel" },
+  ],
+  "contracts-codegen": [
+    { label: "Wasmi Call Builder & Batch", targetTestId: "wasmi-call-builder-panel" },
+    { label: "Typed Contract Facades", targetTestId: "typed-facades-studio-panel" },
+  ],
+  "storage-logs": [
+    { label: "Storage Slot Deriver", targetTestId: "storage-slot-studio-panel" },
+    { label: "Bincode State Decoder", targetTestId: "bincode-decoder-panel" },
+    { label: "Paginated Logs", targetTestId: "paginated-contract-logs-panel" },
+    { label: "Log History Explorer", targetTestId: "log-history-panel" },
+  ],
+  "verify-diagnostics": [
+    { label: "Raw Tx & Node Probe", targetTestId: "raw-tx-and-probe-panel" },
+    { label: "Failover RPC Probe", targetTestId: "failover-rpc-probe-panel" },
+    { label: "Address & Transfer Verifier", targetTestId: "address-and-transfer-panel" },
+    { label: "Receipt Poller", targetTestId: "receipt-poller-panel" },
+    { label: "JSON-RPC Batch", targetTestId: "jsonrpc-batch-runner-panel" },
+    { label: "Watch-Only & History", targetTestId: "account-history-watch-only-panel" },
+    { label: "Fee Tiers & Multisig", targetTestId: "fee-tiers-multisig-panel" },
+    { label: "Golden Vector Self-Test", targetTestId: "golden-vector-selftest-panel" },
+  ],
+};
+
 const GOLDEN_MNEMONIC =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
-export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props) {
+export const WalletContractConsole = memo(function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props) {
+  // Active sub-tab state (all 4 panels stay mounted to preserve 100% state across switches)
+  const [activeSubTab, setActiveSubTab] = useState<WalletSubTabId>("hd-signer");
+
   // Mnemonic state
   const [mnemonic, setMnemonic] = useState<string>(GOLDEN_MNEMONIC);
   const [passphrase, setPassphrase] = useState<string>("");
   const [activeAccountIdx, setActiveAccountIdx] = useState<number>(0);
 
-  // Tx state
-  const [txType, setTxType] = useState<
-    | "transfer"
-    | "token_transfer"
-    | "vault_create"
-    | "name_register"
-    | "htlc_create"
-    | "nft_mint"
-    | "escrow_create"
-  >("transfer");
+  // Shared & split Tx state
+  const [contractCallType, setContractCallType] =
+    useState<ContractCallType>("token_transfer");
   const [nonceStr, setNonceStr] = useState<string>("0");
   const [feeStr, setFeeStr] = useState<string>("10000"); // in atoms
 
@@ -111,6 +179,7 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
   // Contract fields
   const [contractHex, setContractHex] = useState<string>("33".repeat(32));
   const [tokenUnitsStr, setTokenUnitsStr] = useState<string>("100");
+  const [vaultAmountKvncStr, setVaultAmountKvncStr] = useState<string>("1");
   const [lockUntilMsStr, setLockUntilMsStr] = useState<string>(
     (Date.now() + 86400000).toString(),
   );
@@ -119,7 +188,7 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
   const [nameStr, setNameStr] = useState<string>("alice");
   const [namePubkeyHex, setNamePubkeyHex] = useState<string>("");
   const [relayEndpointsStr, setRelayEndpointsStr] = useState<string>(
-    "https://relay1.kovanica.org\nhttps://relay2.kovanica.org",
+    "https://relay1.kovanica.online\nhttps://relay2.kovanica.online",
   );
 
   // HTLC fields
@@ -145,15 +214,17 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
     (Date.now() + 172800000).toString(),
   );
 
-  // Output state
-  const [signedResult, setSignedResult] = useState<{
-    sighashHex: string;
-    signatureHex: string;
-    rawTxHex: string;
-    txSize: number;
-  } | null>(null);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [broadcastStatus, setBroadcastStatus] = useState<string | null>(null);
+  // Output state (shared latest signed result + per-console envelope/error/broadcast state)
+  const [signedResult, setSignedResult] = useState<SignedEnvelopeState | null>(null);
+  const [lastSignedKind, setLastSignedKind] = useState<TxKind["type"] | null>(null);
+  const [transferSignedResult, setTransferSignedResult] =
+    useState<SignedEnvelopeState | null>(null);
+  const [transferErrorMsg, setTransferErrorMsg] = useState<string | null>(null);
+  const [transferBroadcastStatus, setTransferBroadcastStatus] = useState<string | null>(null);
+  const [contractSignedResult, setContractSignedResult] =
+    useState<SignedEnvelopeState | null>(null);
+  const [contractErrorMsg, setContractErrorMsg] = useState<string | null>(null);
+  const [contractBroadcastStatus, setContractBroadcastStatus] = useState<string | null>(null);
   const [copySuccess, setCopySuccess] = useState<string | null>(null);
 
   // SDK v0.4.0 Fee & Nonce Estimation state
@@ -309,14 +380,26 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
     const fresh = generateMnemonic(256);
     setMnemonic(fresh);
     setSignedResult(null);
-    setErrorMsg(null);
+    setLastSignedKind(null);
+    setTransferSignedResult(null);
+    setContractSignedResult(null);
+    setTransferErrorMsg(null);
+    setContractErrorMsg(null);
+    setTransferBroadcastStatus(null);
+    setContractBroadcastStatus(null);
   };
 
   const handleLoadGoldenMnemonic = () => {
     setMnemonic(GOLDEN_MNEMONIC);
     setPassphrase("");
     setSignedResult(null);
-    setErrorMsg(null);
+    setLastSignedKind(null);
+    setTransferSignedResult(null);
+    setContractSignedResult(null);
+    setTransferErrorMsg(null);
+    setContractErrorMsg(null);
+    setTransferBroadcastStatus(null);
+    setContractBroadcastStatus(null);
   };
 
   const copyToClipboard = (text: string, label: string) => {
@@ -327,23 +410,23 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
     setTimeout(() => setCopySuccess(null), 2000);
   };
 
-  const buildActiveCallKind = (): CallTxKind => {
+  const buildContractCallKind = (callKindType: ContractCallType = contractCallType): CallTxKind => {
     if (!activeAccount) {
       throw new Error("No active account available");
     }
     const contract = hexToBytes(contractHex.trim());
-    if (txType === "token_transfer") {
+    if (callKindType === "token_transfer") {
       const recipient = accounts[1]?.publicKey || activeAccount.publicKey;
       const units = BigInt(tokenUnitsStr || "0");
       return buildTokenTransferCall(contract, recipient, units);
     }
-    if (txType === "vault_create") {
+    if (callKindType === "vault_create") {
       const beneficiary = accounts[1]?.publicKey || activeAccount.publicKey;
-      const atoms = parseKvnc(amountKvncStr || "0");
+      const atoms = parseKvnc(vaultAmountKvncStr || "0");
       const lockUntil = BigInt(lockUntilMsStr || (Date.now() + 86400000).toString());
       return buildVaultCreateCall(contract, beneficiary, atoms, lockUntil);
     }
-    if (txType === "name_register") {
+    if (callKindType === "name_register") {
       const regPubkey = namePubkeyHex.trim()
         ? hexToBytes(namePubkeyHex.trim())
         : accounts[1]?.publicKey || activeAccount.publicKey;
@@ -360,7 +443,7 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
         gasLimit: 100_000n,
       };
     }
-    if (txType === "htlc_create") {
+    if (callKindType === "htlc_create") {
       const hashlock = hexToBytes(hashlockHex.trim());
       const timelock = BigInt(timelockStr.trim() || "0");
       const recipient = htlcRecipientHex.trim()
@@ -375,7 +458,7 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
         gasLimit: 100_000n,
       };
     }
-    if (txType === "nft_mint") {
+    if (callKindType === "nft_mint") {
       const collection = hexToBytes(collectionHex.trim());
       const to = nftToHex.trim()
         ? hexToBytes(nftToHex.trim())
@@ -390,7 +473,7 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
         gasLimit: 100_000n,
       };
     }
-    if (txType === "escrow_create") {
+    if (callKindType === "escrow_create") {
       const rawParties = escrowPartiesStr
         .split(/[\n,]/)
         .map((s) => s.trim())
@@ -411,7 +494,7 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
         gasLimit: 100_000n,
       };
     }
-    throw new Error(`Estimate is only supported for Wasmi contract call actions (got ${txType})`);
+    throw new Error(`Unsupported Wasmi contract call action (got ${callKindType})`);
   };
 
   const resolvedRpcUrl = useMemo(() => {
@@ -424,15 +507,15 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
   }, [rpcUrl, client]);
 
   const handleEstimateCall = async () => {
-    setErrorMsg(null);
+    setContractErrorMsg(null);
     setPreparedEstimate(null);
     if (!activeAccount) {
-      setErrorMsg("No active account available for fee estimation");
+      setContractErrorMsg("No active account available for fee estimation");
       return;
     }
     setIsEstimating(true);
     try {
-      const callKind = buildActiveCallKind();
+      const callKind = buildContractCallKind();
       const prepared = await estimateContractCall(client, callKind, {
         sender: activeAccount.address,
         chainId: selectedChainId,
@@ -443,20 +526,20 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
         setNonceStr(prepared.nonce.toString());
       }
     } catch (err: any) {
-      setErrorMsg(`Fee estimation failed: ${err?.message || String(err)}`);
+      setContractErrorMsg(`Fee estimation failed: ${err?.message || String(err)}`);
     } finally {
       setIsEstimating(false);
     }
   };
 
   const handleQueueToBatch = () => {
-    setErrorMsg(null);
+    setContractErrorMsg(null);
     try {
-      const callKind = buildActiveCallKind();
+      const callKind = buildContractCallKind();
       setBatchQueue((prev) => [...prev, callKind]);
       setBatchEstimateResult(null);
     } catch (err: any) {
-      setErrorMsg(`Cannot queue call to batch: ${err?.message || String(err)}`);
+      setContractErrorMsg(`Cannot queue call to batch: ${err?.message || String(err)}`);
     }
   };
 
@@ -466,16 +549,16 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
   };
 
   const handleEstimateBatch = async () => {
-    setErrorMsg(null);
+    setContractErrorMsg(null);
     setBatchEstimateResult(null);
     if (!activeAccount) {
-      setErrorMsg("No active account available for batch estimation");
+      setContractErrorMsg("No active account available for batch estimation");
       return;
     }
     setIsEstimatingBatch(true);
     try {
       const callsToEstimate =
-        batchQueue.length > 0 ? batchQueue : [buildActiveCallKind()];
+        batchQueue.length > 0 ? batchQueue : [buildContractCallKind()];
       if (batchQueue.length === 0) {
         setBatchQueue(callsToEstimate);
       }
@@ -485,16 +568,16 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
       });
       setBatchEstimateResult(batchRes);
     } catch (err: any) {
-      setErrorMsg(`Batch estimation failed: ${err?.message || String(err)}`);
+      setContractErrorMsg(`Batch estimation failed: ${err?.message || String(err)}`);
     } finally {
       setIsEstimatingBatch(false);
     }
   };
 
   const handleExportCurlSnippet = () => {
-    setErrorMsg(null);
+    setContractErrorMsg(null);
     try {
-      const callKind = buildActiveCallKind();
+      const callKind = buildContractCallKind();
       const snippet = buildPlaygroundCallCurlSnippet({
         rpcUrl: resolvedRpcUrl,
         call: callKind,
@@ -503,14 +586,14 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
       setActiveCodeSnippet({ kind: "curl", code: snippet });
       copyToClipboard(snippet, "curl-snippet");
     } catch (err: any) {
-      setErrorMsg(`Failed to generate cURL snippet: ${err?.message || String(err)}`);
+      setContractErrorMsg(`Failed to generate cURL snippet: ${err?.message || String(err)}`);
     }
   };
 
   const handleExportSdkSnippet = () => {
-    setErrorMsg(null);
+    setContractErrorMsg(null);
     try {
-      const callKind = buildActiveCallKind();
+      const callKind = buildContractCallKind();
       const snippet = buildPlaygroundCallSdkSnippet({
         rpcUrl: resolvedRpcUrl,
         call: callKind,
@@ -520,16 +603,16 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
       setActiveCodeSnippet({ kind: "sdk", code: snippet });
       copyToClipboard(snippet, "sdk-snippet");
     } catch (err: any) {
-      setErrorMsg(`Failed to generate SDK snippet: ${err?.message || String(err)}`);
+      setContractErrorMsg(`Failed to generate SDK snippet: ${err?.message || String(err)}`);
     }
   };
 
   const handleExportBatchPresets = () => {
-    setErrorMsg(null);
+    setContractErrorMsg(null);
     setPresetsErrorMsg(null);
     setPresetsStatusMsg(null);
     try {
-      const callsToExport = batchQueue.length > 0 ? batchQueue : [buildActiveCallKind()];
+      const callsToExport = batchQueue.length > 0 ? batchQueue : [buildContractCallKind()];
       const json = exportContractPresetsJson(callsToExport);
       setPresetsJsonInput(json);
       setShowPresetsPanel(true);
@@ -647,13 +730,25 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
     }
   };
 
-  const handleSign = () => {
-    setErrorMsg(null);
-    setSignedResult(null);
-    setBroadcastStatus(null);
+  const handleSign = (mode: "transfer" | ContractCallType) => {
+    const isTransfer = mode === "transfer";
+    if (isTransfer) {
+      setTransferErrorMsg(null);
+      setTransferSignedResult(null);
+      setTransferBroadcastStatus(null);
+    } else {
+      setContractErrorMsg(null);
+      setContractSignedResult(null);
+      setContractBroadcastStatus(null);
+    }
 
     if (!activeAccount) {
-      setErrorMsg("No active account available for signing");
+      const msg = "No active account available for signing";
+      if (isTransfer) {
+        setTransferErrorMsg(msg);
+      } else {
+        setContractErrorMsg(msg);
+      }
       return;
     }
 
@@ -662,7 +757,7 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
       const fee = BigInt(feeStr || "10000");
 
       let kind: TxKind;
-      if (txType === "transfer") {
+      if (mode === "transfer") {
         const toPubkey = recipientInput.trim()
           ? accounts[1]?.publicKey // fallback or decoded
           : accounts[1]?.publicKey || activeAccount.publicKey;
@@ -672,90 +767,8 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
           to: toPubkey,
           amount: amountAtoms,
         };
-      } else if (txType === "token_transfer") {
-        const contract = hexToBytes(contractHex.trim());
-        const recipient = accounts[1]?.publicKey || activeAccount.publicKey;
-        const units = BigInt(tokenUnitsStr || "0");
-        kind = buildTokenTransferCall(contract, recipient, units);
-      } else if (txType === "vault_create") {
-        const contract = hexToBytes(contractHex.trim());
-        const beneficiary = accounts[1]?.publicKey || activeAccount.publicKey;
-        const atoms = parseKvnc(amountKvncStr || "0");
-        const lockUntil = BigInt(lockUntilMsStr || (Date.now() + 86400000).toString());
-        kind = buildVaultCreateCall(contract, beneficiary, atoms, lockUntil);
-      } else if (txType === "name_register") {
-        const contract = hexToBytes(contractHex.trim());
-        const regPubkey = namePubkeyHex.trim()
-          ? hexToBytes(namePubkeyHex.trim())
-          : accounts[1]?.publicKey || activeAccount.publicKey;
-        const endpoints = relayEndpointsStr
-          .split("\n")
-          .map((s) => s.trim())
-          .filter((s) => s.length > 0);
-        const args = buildNameRegisterCall(nameStr.trim(), regPubkey, endpoints);
-        kind = {
-          type: "call",
-          contract,
-          value: 0n,
-          method: "name_register",
-          args,
-          gasLimit: 100_000n,
-        };
-      } else if (txType === "htlc_create") {
-        const contract = hexToBytes(contractHex.trim());
-        const hashlock = hexToBytes(hashlockHex.trim());
-        const timelock = BigInt(timelockStr.trim() || "0");
-        const recipient = htlcRecipientHex.trim()
-          ? hexToBytes(htlcRecipientHex.trim())
-          : accounts[1]?.publicKey || activeAccount.publicKey;
-        const args = buildHtlcCreateCall(hashlock, timelock, recipient);
-        kind = {
-          type: "call",
-          contract,
-          value: 0n,
-          method: "htlc_create",
-          args,
-          gasLimit: 100_000n,
-        };
-      } else if (txType === "nft_mint") {
-        const contract = hexToBytes(contractHex.trim());
-        const collection = hexToBytes(collectionHex.trim());
-        const to = nftToHex.trim()
-          ? hexToBytes(nftToHex.trim())
-          : accounts[1]?.publicKey || activeAccount.publicKey;
-        const tokenId = BigInt(tokenIdStr.trim() || "0");
-        const args = buildNftMintCall(collection, to, tokenId, tokenUriStr.trim());
-        kind = {
-          type: "call",
-          contract,
-          value: 0n,
-          method: "nft_mint",
-          args,
-          gasLimit: 100_000n,
-        };
-      } else if (txType === "escrow_create") {
-        const contract = hexToBytes(contractHex.trim());
-        const rawParties = escrowPartiesStr
-          .split(/[\n,]/)
-          .map((s) => s.trim())
-          .filter((s) => s.length > 0);
-        const parties = rawParties.length > 0
-          ? rawParties.map((p) => hexToBytes(p))
-          : [activeAccount.publicKey, accounts[1]?.publicKey || activeAccount.publicKey];
-        const threshold = Number(escrowThresholdStr.trim() || "1");
-        const amount = BigInt(escrowAmountStr.trim() || "0");
-        const deadline = BigInt(escrowDeadlineStr.trim() || "0");
-        const args = buildEscrowCreateCall(parties, threshold, amount, deadline);
-        kind = {
-          type: "call",
-          contract,
-          value: 0n,
-          method: "escrow_create",
-          args,
-          gasLimit: 100_000n,
-        };
       } else {
-        throw new Error(`Unknown transaction type: ${txType}`);
+        kind = buildContractCallKind(mode);
       }
 
       const tx: UnsignedTx = {
@@ -766,29 +779,141 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
       };
 
       const result = signAndSerializeTransaction(tx, activeAccount.secretKey, selectedChainId);
-      setSignedResult({
+      const envelope: SignedEnvelopeState = {
         sighashHex: result.sighashHex,
         signatureHex: result.signatureHex,
         rawTxHex: result.rawTxHex,
         txSize: result.txSize,
-      });
+      };
+      setSignedResult(envelope);
+      setLastSignedKind(kind.type);
+      if (isTransfer) {
+        setTransferSignedResult(envelope);
+      } else {
+        setContractSignedResult(envelope);
+      }
     } catch (err: any) {
-      setErrorMsg(err?.message || String(err));
+      const msg = err?.message || String(err);
+      if (isTransfer) {
+        setTransferErrorMsg(msg);
+      } else {
+        setContractErrorMsg(msg);
+      }
     }
   };
 
-  const handleBroadcast = async () => {
-    if (!signedResult?.rawTxHex) return;
-    setBroadcastStatus("Broadcasting via kovanica_sendRawTransaction...");
+  const handleBroadcast = async (rawTxHex: string, target: "transfer" | "contract") => {
+    if (!rawTxHex) return;
+    const setStatus =
+      target === "transfer" ? setTransferBroadcastStatus : setContractBroadcastStatus;
+    setStatus("Broadcasting via kovanica_sendRawTransaction...");
     try {
-      const hash = await client.call<string>("kovanica_sendRawTransaction", [
-        signedResult.rawTxHex,
-      ]);
-      setBroadcastStatus(`Broadcast accepted! Transaction hash: ${hash}`);
+      const hash = await client.call<string>("kovanica_sendRawTransaction", [rawTxHex]);
+      setStatus(`Broadcast accepted! Transaction hash: ${hash}`);
     } catch (err: any) {
-      setBroadcastStatus(`Broadcast error: ${err?.message || String(err)}`);
+      setStatus(`Broadcast error: ${err?.message || String(err)}`);
     }
   };
+
+  const jumpToPanel = (subTab: WalletSubTabId, panelTestId: string) => {
+    if (activeSubTab !== subTab) {
+      setActiveSubTab(subTab);
+    }
+    const scrollTarget = () => {
+      const el = document.querySelector(`[data-testid="${panelTestId}"]`);
+      if (el && typeof el.scrollIntoView === "function") {
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    };
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(scrollTarget);
+    } else {
+      scrollTarget();
+    }
+  };
+
+  const renderToolRail = (subTab: WalletSubTabId) => (
+    <nav
+      aria-label="Section quick-jump tools"
+      data-testid={`tool-rail-${subTab}`}
+      className="bg-surface/80 border border-border rounded-xl px-4 py-2.5 flex flex-wrap items-center gap-1.5 text-xs"
+    >
+      <span className="text-[11px] font-semibold uppercase tracking-wider text-muted mr-1">
+        Tools:
+      </span>
+      {GROUP_TOOL_RAILS[subTab].map((item) => (
+        <button
+          key={item.targetTestId}
+          type="button"
+          onClick={() => jumpToPanel(subTab, item.targetTestId)}
+          className="px-2.5 py-1 rounded-md bg-surface-2 hover:bg-border border border-border text-muted hover:text-fg transition-colors whitespace-nowrap"
+        >
+          {item.label}
+        </button>
+      ))}
+    </nav>
+  );
+
+  const renderSignedEnvelopeCard = (
+    envelope: SignedEnvelopeState,
+    broadcastStatusText: string | null,
+    target: "transfer" | "contract",
+  ) => (
+    <div className="bg-surface-2 p-4 rounded-lg border border-border flex flex-col gap-3 text-xs">
+      <div className="flex items-center justify-between border-b border-border/60 pb-2">
+        <span className="font-semibold text-fg">
+          Signed Bincode Envelope ({envelope.txSize} Bytes)
+        </span>
+        <span className="font-mono text-gold text-[11px]">Domain: KVNC/tx/v1</span>
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <span className="text-muted">Keyed BLAKE3 Sighash (32 bytes):</span>
+        <span className="font-mono text-fg break-all bg-surface p-2 rounded">
+          {envelope.sighashHex}
+        </span>
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <span className="text-muted">Ed25519 Signature (64 bytes):</span>
+        <span className="font-mono text-fg break-all bg-surface p-2 rounded">
+          {envelope.signatureHex}
+        </span>
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <div className="flex items-center justify-between">
+          <span className="text-muted">Raw Wire Payload (Bincode Hex):</span>
+          <button
+            type="button"
+            onClick={() => copyToClipboard(envelope.rawTxHex, `tx-${target}`)}
+            className="text-subtle hover:text-fg font-medium"
+          >
+            {copySuccess === `tx-${target}` ? "Copied!" : "Copy Hex"}
+          </button>
+        </div>
+        <textarea
+          readOnly
+          value={envelope.rawTxHex}
+          rows={3}
+          className="w-full bg-surface p-2 rounded font-mono text-[11px] text-emerald-400 break-all resize-none border border-border/40"
+        />
+      </div>
+
+      <div className="flex items-center gap-3 mt-2">
+        <button
+          type="button"
+          onClick={() => handleBroadcast(envelope.rawTxHex, target)}
+          className="px-4 py-1.5 bg-surface-2 hover:bg-border rounded border border-border text-fg font-medium text-xs transition-colors"
+        >
+          Broadcast to Connected Node (kovanica_sendRawTransaction)
+        </button>
+        {broadcastStatusText && (
+          <span className="text-xs text-muted font-mono">{broadcastStatusText}</span>
+        )}
+      </div>
+    </div>
+  );
 
   const handleProbeMempoolFees = async () => {
     setMempoolFeeError(null);
@@ -811,8 +936,93 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
 
   return (
     <div className="flex flex-col gap-6" data-testid="wallet-contract-console">
+      {/* Level 1: Sub-Tab Bar + Active Signer Context Strip */}
+      <div className="bg-surface rounded-xl border border-border p-4 flex flex-col gap-3">
+        <div
+          role="tablist"
+          aria-label="Wallet and Contracts Tools"
+          className="flex flex-wrap items-center gap-2 border-b border-border pb-3"
+        >
+          {WALLET_SUBTABS.map((tab) => {
+            const isActive = activeSubTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                aria-selected={isActive}
+                aria-controls={`wallet-tabpanel-${tab.id}`}
+                data-testid={tab.testId}
+                onClick={() => setActiveSubTab(tab.id)}
+                className={`px-3.5 py-2 text-xs font-semibold rounded-lg transition-colors ${
+                  isActive
+                    ? "bg-gold text-bg font-bold shadow-sm"
+                    : "bg-surface-2 text-muted hover:text-fg border border-border"
+                }`}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Active Signer Context Strip */}
+        <div
+          data-testid="wallet-signer-context-strip"
+          className="flex flex-wrap items-center justify-between gap-2 text-xs"
+        >
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-muted">
+            <span>
+              Active Signer:{" "}
+              <strong className="text-fg">
+                {activeAccount ? `Account #${activeAccount.accountIndex}` : "No Valid Mnemonic"}
+              </strong>
+            </span>
+            {activeAccount && (
+              <span className="text-emerald-400 break-all">
+                {activeAccount.address.slice(0, 14)}...{activeAccount.address.slice(-8)}
+              </span>
+            )}
+            <span>
+              Chain ID: <strong className="text-gold">{selectedChainId}</strong>
+            </span>
+          </div>
+
+          {signedResult && (
+            <div className="flex flex-wrap items-center gap-2 font-mono text-[11px]">
+              <span className="px-2 py-0.5 rounded bg-gold/15 border border-gold/40 text-gold">
+                Signed {lastSignedKind === "transfer" ? "Transfer" : "Call"} ({signedResult.txSize}B)
+              </span>
+              <button
+                type="button"
+                onClick={() => jumpToPanel("hd-signer", "universal-tx-airgap-panel")}
+                className="px-2 py-0.5 rounded bg-surface-2 hover:bg-border border border-border text-muted hover:text-fg transition-colors"
+              >
+                Air-Gap Studio
+              </button>
+              <button
+                type="button"
+                onClick={() => jumpToPanel("verify-diagnostics", "raw-tx-and-probe-panel")}
+                className="px-2 py-0.5 rounded bg-surface-2 hover:bg-border border border-border text-muted hover:text-fg transition-colors"
+              >
+                Verify Raw Tx
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Group 1: HD Wallet & Signer */}
+      <div
+        id="wallet-tabpanel-hd-signer"
+        role="tabpanel"
+        data-testid="wallet-panel-group-hd-signer"
+        hidden={activeSubTab !== "hd-signer"}
+        className={activeSubTab === "hd-signer" ? "flex flex-col gap-6" : "hidden"}
+      >
+        {renderToolRail("hd-signer")}
       {/* Overview Card */}
-      <div className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-4">
+      <div className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-4" data-testid="hd-wallet-panel">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-4">
           <div>
             <h2 className="text-base font-semibold text-fg">
@@ -941,32 +1151,26 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
         )}
       </div>
 
-      {/* Transaction Signing & Wasmi Interop */}
-      <div className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-5">
-        <h2 className="text-sm font-semibold text-fg border-b border-border pb-3">
-          Construct & Sign Canonical Transaction
-        </h2>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      {/* Native Transfer Signing Console */}
+      <div
+        className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-5"
+        data-testid="native-transfer-signer-panel"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
           <div>
-            <label className="block text-xs font-medium text-muted mb-1">
-              Transaction Action
-            </label>
-            <select
-              value={txType}
-              onChange={(e) => setTxType(e.target.value as any)}
-              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-medium text-fg focus:outline-none focus:border-gold"
-            >
-              <option value="transfer">Native Transfer (KVNC)</option>
-              <option value="token_transfer">Wasmi: Token Transfer (token_transfer)</option>
-              <option value="vault_create">Wasmi: Timelocked Vault (vault_create)</option>
-              <option value="name_register">Wasmi: Name Registry (name_register)</option>
-              <option value="htlc_create">Wasmi: Hash Time Locked Contract (htlc_create)</option>
-              <option value="nft_mint">Wasmi: NFT Mint (nft_mint)</option>
-              <option value="escrow_create">Wasmi: Escrow Create (escrow_create)</option>
-            </select>
+            <h2 className="text-sm font-semibold text-fg">
+              Native Transfer Signing Console
+            </h2>
+            <p className="text-xs text-muted">
+              Sign canonical KVNC native transfers offline with SLIP-0010 Ed25519 and KVNC/tx/v1 domain separation
+            </p>
           </div>
+          <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-surface-2 border border-border text-gold">
+            KVNC Transfer
+          </span>
+        </div>
 
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
             <label className="block text-xs font-medium text-muted mb-1">
               Account Nonce
@@ -992,2349 +1196,51 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
           </div>
         </div>
 
-        {/* Dynamic Action Parameters */}
         <div className="bg-surface-2/60 p-4 rounded-lg border border-border/80 flex flex-col gap-3">
-          {txType === "transfer" && (
-            <>
-              <div>
-                <label className="block text-xs font-medium text-muted mb-1">
-                  Recipient (Defaults to Account #1)
-                </label>
-                <input
-                  type="text"
-                  value={recipientInput}
-                  onChange={(e) => setRecipientInput(e.target.value)}
-                  placeholder={accounts[1]?.address || "Recipient kvnc/tknc address"}
-                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-muted mb-1">
-                  Amount (KVNC)
-                </label>
-                <input
-                  type="text"
-                  value={amountKvncStr}
-                  onChange={(e) => setAmountKvncStr(e.target.value)}
-                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
-                />
-              </div>
-            </>
-          )}
-
-          {txType === "token_transfer" && (
-            <>
-              <div>
-                <label className="block text-xs font-medium text-muted mb-1">
-                  Token Contract Address (32-byte hex)
-                </label>
-                <input
-                  type="text"
-                  value={contractHex}
-                  onChange={(e) => setContractHex(e.target.value)}
-                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-muted mb-1">
-                  Token Units (u128)
-                </label>
-                <input
-                  type="text"
-                  value={tokenUnitsStr}
-                  onChange={(e) => setTokenUnitsStr(e.target.value)}
-                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
-                />
-              </div>
-            </>
-          )}
-
-          {txType === "vault_create" && (
-            <>
-              <div>
-                <label className="block text-xs font-medium text-muted mb-1">
-                  Vault Contract Address (32-byte hex)
-                </label>
-                <input
-                  type="text"
-                  value={contractHex}
-                  onChange={(e) => setContractHex(e.target.value)}
-                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-muted mb-1">
-                    Deposit Amount (KVNC)
-                  </label>
-                  <input
-                    type="text"
-                    value={amountKvncStr}
-                    onChange={(e) => setAmountKvncStr(e.target.value)}
-                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-muted mb-1">
-                    Lock Until (ms timestamp)
-                  </label>
-                  <input
-                    type="text"
-                    value={lockUntilMsStr}
-                    onChange={(e) => setLockUntilMsStr(e.target.value)}
-                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
-                  />
-                </div>
-              </div>
-            </>
-          )}
-
-          {txType === "name_register" && (
-            <>
-              <div>
-                <label className="block text-xs font-medium text-muted mb-1">
-                  Name Registry Contract Address (32-byte hex)
-                </label>
-                <input
-                  type="text"
-                  value={contractHex}
-                  onChange={(e) => setContractHex(e.target.value)}
-                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
-                />
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-muted mb-1">
-                    Registered Name
-                  </label>
-                  <input
-                    type="text"
-                    value={nameStr}
-                    onChange={(e) => setNameStr(e.target.value)}
-                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-muted mb-1">
-                    Registered Public Key (32-byte hex)
-                  </label>
-                  <input
-                    type="text"
-                    value={namePubkeyHex}
-                    onChange={(e) => setNamePubkeyHex(e.target.value)}
-                    placeholder={accounts[1]?.publicKeyHex || "Defaults to Account #1"}
-                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-muted mb-1">
-                  Relay Endpoints (one URL per line)
-                </label>
-                <textarea
-                  rows={2}
-                  value={relayEndpointsStr}
-                  onChange={(e) => setRelayEndpointsStr(e.target.value)}
-                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
-                />
-              </div>
-            </>
-          )}
-
-          {txType === "htlc_create" && (
-            <>
-              <div>
-                <label className="block text-xs font-medium text-muted mb-1">
-                  HTLC Contract Address (32-byte hex)
-                </label>
-                <input
-                  type="text"
-                  value={contractHex}
-                  onChange={(e) => setContractHex(e.target.value)}
-                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-muted mb-1">
-                  Hash Lock (32-byte hex)
-                </label>
-                <input
-                  type="text"
-                  value={hashlockHex}
-                  onChange={(e) => setHashlockHex(e.target.value)}
-                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
-                />
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-muted mb-1">
-                    Timelock Expiry (u64 timestamp/height)
-                  </label>
-                  <input
-                    type="text"
-                    value={timelockStr}
-                    onChange={(e) => setTimelockStr(e.target.value)}
-                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-muted mb-1">
-                    Recipient Public Key (32-byte hex)
-                  </label>
-                  <input
-                    type="text"
-                    value={htlcRecipientHex}
-                    onChange={(e) => setHtlcRecipientHex(e.target.value)}
-                    placeholder={accounts[1]?.publicKeyHex || "Defaults to Account #1"}
-                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
-                  />
-                </div>
-              </div>
-            </>
-          )}
-
-          {txType === "nft_mint" && (
-            <>
-              <div>
-                <label className="block text-xs font-medium text-muted mb-1">
-                  NFT Contract Address (32-byte hex)
-                </label>
-                <input
-                  type="text"
-                  value={contractHex}
-                  onChange={(e) => setContractHex(e.target.value)}
-                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
-                />
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-muted mb-1">
-                    Collection Public Key (32-byte hex)
-                  </label>
-                  <input
-                    type="text"
-                    value={collectionHex}
-                    onChange={(e) => setCollectionHex(e.target.value)}
-                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-muted mb-1">
-                    Recipient / To Public Key (32-byte hex)
-                  </label>
-                  <input
-                    type="text"
-                    value={nftToHex}
-                    onChange={(e) => setNftToHex(e.target.value)}
-                    placeholder={accounts[1]?.publicKeyHex || "Defaults to Account #1"}
-                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
-                  />
-                </div>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-muted mb-1">
-                    Token ID (u128)
-                  </label>
-                  <input
-                    type="text"
-                    value={tokenIdStr}
-                    onChange={(e) => setTokenIdStr(e.target.value)}
-                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
-                  />
-                </div>
-                <div className="md:col-span-2">
-                  <label className="block text-xs font-medium text-muted mb-1">
-                    Token URI
-                  </label>
-                  <input
-                    type="text"
-                    value={tokenUriStr}
-                    onChange={(e) => setTokenUriStr(e.target.value)}
-                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
-                  />
-                </div>
-              </div>
-            </>
-          )}
-
-          {txType === "escrow_create" && (
-            <>
-              <div>
-                <label className="block text-xs font-medium text-muted mb-1">
-                  Escrow Contract Address (32-byte hex)
-                </label>
-                <input
-                  type="text"
-                  value={contractHex}
-                  onChange={(e) => setContractHex(e.target.value)}
-                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-muted mb-1">
-                  Parties Public Keys (32-byte hexes, one per line or comma-separated)
-                </label>
-                <textarea
-                  rows={2}
-                  value={escrowPartiesStr}
-                  onChange={(e) => setEscrowPartiesStr(e.target.value)}
-                  placeholder={
-                    accounts.length >= 2
-                      ? `${accounts[0].publicKeyHex}\n${accounts[1].publicKeyHex}`
-                      : "Defaults to Account #0 and #1"
-                  }
-                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
-                />
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-muted mb-1">
-                    Threshold (u8)
-                  </label>
-                  <input
-                    type="number"
-                    min={1}
-                    max={255}
-                    value={escrowThresholdStr}
-                    onChange={(e) => setEscrowThresholdStr(e.target.value)}
-                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-muted mb-1">
-                    Amount (atoms)
-                  </label>
-                  <input
-                    type="text"
-                    value={escrowAmountStr}
-                    onChange={(e) => setEscrowAmountStr(e.target.value)}
-                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-muted mb-1">
-                    Deadline (u64 timestamp)
-                  </label>
-                  <input
-                    type="text"
-                    value={escrowDeadlineStr}
-                    onChange={(e) => setEscrowDeadlineStr(e.target.value)}
-                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
-                  />
-                </div>
-              </div>
-            </>
-          )}
+          <div>
+            <label className="block text-xs font-medium text-muted mb-1">
+              Recipient (Defaults to Account #1)
+            </label>
+            <input
+              type="text"
+              value={recipientInput}
+              onChange={(e) => setRecipientInput(e.target.value)}
+              placeholder={accounts[1]?.address || "Recipient kvnc/tknc address"}
+              className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-muted mb-1">
+              Amount (KVNC)
+            </label>
+            <input
+              type="text"
+              value={amountKvncStr}
+              onChange={(e) => setAmountKvncStr(e.target.value)}
+              className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+            />
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
           <button
             type="button"
-            onClick={handleSign}
+            onClick={() => handleSign("transfer")}
             disabled={!isMnemonicValid}
             className="px-5 py-2.5 bg-gold hover:bg-gold/90 text-bg font-semibold rounded-lg text-sm transition-colors disabled:opacity-50"
           >
             Sign & Bincode Serialize
           </button>
-
-          {txType !== "transfer" && (
-            <>
-              <button
-                type="button"
-                data-testid="estimate-call-btn"
-                onClick={handleEstimateCall}
-                disabled={!isMnemonicValid || isEstimating}
-                className="px-4 py-2.5 bg-surface-2 hover:bg-border text-fg font-medium rounded-lg text-xs border border-border transition-colors disabled:opacity-50"
-              >
-                {isEstimating ? "Estimating..." : "Estimate Fee & Nonce (SDK)"}
-              </button>
-
-              <button
-                type="button"
-                data-testid="queue-batch-call-btn"
-                onClick={handleQueueToBatch}
-                disabled={!isMnemonicValid}
-                className="px-3.5 py-2.5 bg-surface-2 hover:bg-border text-fg font-medium rounded-lg text-xs border border-border transition-colors disabled:opacity-50"
-              >
-                Queue to Batch ({batchQueue.length})
-              </button>
-
-              <button
-                type="button"
-                data-testid="estimate-batch-btn"
-                onClick={handleEstimateBatch}
-                disabled={!isMnemonicValid || isEstimatingBatch}
-                className="px-3.5 py-2.5 bg-gold/20 hover:bg-gold/30 text-gold font-semibold rounded-lg text-xs border border-gold/40 transition-colors disabled:opacity-50"
-              >
-                {isEstimatingBatch ? "Estimating Batch..." : "Estimate Batch"}
-              </button>
-
-              {batchQueue.length > 0 && (
-                <button
-                  type="button"
-                  data-testid="clear-batch-btn"
-                  onClick={handleClearBatch}
-                  className="px-3 py-2.5 bg-surface-2 hover:bg-border text-muted hover:text-fg font-medium rounded-lg text-xs border border-border transition-colors"
-                >
-                  Clear Batch
-                </button>
-              )}
-
-              <button
-                type="button"
-                data-testid="copy-curl-snippet-btn"
-                onClick={handleExportCurlSnippet}
-                disabled={!isMnemonicValid}
-                className="px-3.5 py-2.5 bg-surface-2 hover:bg-border text-fg font-medium rounded-lg text-xs border border-border transition-colors disabled:opacity-50"
-              >
-                {copySuccess === "curl-snippet" ? "Copied cURL!" : "Copy JSON-RPC cURL"}
-              </button>
-
-              <button
-                type="button"
-                data-testid="copy-sdk-snippet-btn"
-                onClick={handleExportSdkSnippet}
-                disabled={!isMnemonicValid}
-                className="px-3.5 py-2.5 bg-surface-2 hover:bg-border text-fg font-medium rounded-lg text-xs border border-border transition-colors disabled:opacity-50"
-              >
-                {copySuccess === "sdk-snippet" ? "Copied SDK!" : "Copy SDK Snippet"}
-              </button>
-
-              <button
-                type="button"
-                data-testid="export-batch-presets-btn"
-                onClick={handleExportBatchPresets}
-                disabled={!isMnemonicValid}
-                className="px-3.5 py-2.5 bg-surface-2 hover:bg-border text-fg font-medium rounded-lg text-xs border border-border transition-colors disabled:opacity-50"
-              >
-                {copySuccess === "batch-presets" ? "Exported JSON!" : "Export Batch Presets JSON"}
-              </button>
-
-              <button
-                type="button"
-                data-testid="toggle-import-presets-btn"
-                onClick={() => {
-                  setShowPresetsPanel((prev) => !prev);
-                  setPresetsErrorMsg(null);
-                }}
-                className="px-3.5 py-2.5 bg-surface-2 hover:bg-border text-fg font-medium rounded-lg text-xs border border-border transition-colors"
-              >
-                Import Presets JSON
-              </button>
-            </>
-          )}
         </div>
 
-        {showPresetsPanel && txType !== "transfer" && (
-          <div
-            data-testid="presets-json-panel"
-            className="bg-surface-2 border border-border rounded-lg p-3.5 flex flex-col gap-2.5 text-xs"
-          >
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="font-semibold text-fg">
-                Batch Call Presets JSON (Export / Import)
-              </span>
-              <div className="flex items-center gap-3">
-                {presetsJsonInput.trim().length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => copyToClipboard(presetsJsonInput, "batch-presets")}
-                    className="text-gold hover:underline font-medium"
-                  >
-                    Copy JSON
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => setShowPresetsPanel(false)}
-                  className="text-muted hover:text-fg"
-                >
-                  Hide
-                </button>
-              </div>
-            </div>
-            <textarea
-              data-testid="presets-json-input"
-              rows={5}
-              value={presetsJsonInput}
-              onChange={(e) => setPresetsJsonInput(e.target.value)}
-              placeholder='{"version": 1, "presets": [{"contractHex": "...", "method": "...", "argsHex": "...", "value": "0", "gasLimit": "100000"}]}'
-              className="w-full bg-surface border border-border/60 rounded p-2.5 font-mono text-[11px] text-fg focus:outline-none focus:border-gold"
-            />
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                data-testid="import-presets-apply-btn"
-                onClick={handleImportBatchPresets}
-                className="px-3.5 py-1.5 bg-gold/20 hover:bg-gold/30 text-gold font-semibold rounded border border-gold/40 transition-colors"
-              >
-                Load Presets into Batch
-              </button>
-            </div>
-            {presetsStatusMsg && (
-              <div
-                data-testid="presets-status-msg"
-                className="text-xs font-mono text-emerald-400"
-              >
-                {presetsStatusMsg}
-              </div>
-            )}
-            {presetsErrorMsg && (
-              <div
-                data-testid="presets-error-msg"
-                className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded p-2"
-              >
-                {presetsErrorMsg}
-              </div>
-            )}
-          </div>
-        )}
-
-        {activeCodeSnippet && txType !== "transfer" && (
-          <div
-            data-testid="code-exporter-preview"
-            className="bg-surface-2 border border-border rounded-lg p-3 flex flex-col gap-2 text-xs"
-          >
-            <div className="flex items-center justify-between">
-              <span className="font-semibold text-fg">
-                {activeCodeSnippet.kind === "curl"
-                  ? "JSON-RPC cURL Command (kovanica_call)"
-                  : "TypeScript kovanica-sdk Snippet (estimateAndBuildCall + dryRunCall)"}
-              </span>
-              <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={() =>
-                    copyToClipboard(
-                      activeCodeSnippet.code,
-                      activeCodeSnippet.kind === "curl" ? "curl-snippet" : "sdk-snippet",
-                    )
-                  }
-                  className="text-gold hover:underline font-medium"
-                >
-                  Copy
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveCodeSnippet(null)}
-                  className="text-muted hover:text-fg"
-                >
-                  Hide
-                </button>
-              </div>
-            </div>
-            <pre
-              data-testid="code-exporter-snippet"
-              className="bg-surface border border-border/60 rounded p-2.5 font-mono text-[11px] text-emerald-400 overflow-x-auto"
-            >
-              {activeCodeSnippet.code}
-            </pre>
-          </div>
-        )}
-
-        {(batchQueue.length > 0 || batchEstimateResult) && txType !== "transfer" && (
-          <div
-            data-testid="batch-estimator-panel"
-            className="bg-surface-2/80 border border-gold/30 rounded-lg p-3.5 flex flex-col gap-2.5 text-xs"
-          >
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 pb-2">
-              <span className="font-semibold text-fg">
-                Multi-Call Batch Estimator ({batchEstimateResult ? batchEstimateResult.calls.length : batchQueue.length} Call{(batchEstimateResult ? batchEstimateResult.calls.length : batchQueue.length) === 1 ? "" : "s"})
-              </span>
-              {batchEstimateResult && (
-                <div
-                  data-testid="batch-estimate-totals"
-                  className="font-mono flex flex-wrap gap-x-4 gap-y-1 text-muted"
-                >
-                  <span>
-                    Total Size: <strong className="text-fg">{batchEstimateResult.totalEstimatedTxSize}B</strong>
-                  </span>
-                  <span>
-                    Rate: <strong className="text-fg">{batchEstimateResult.feeRatePerByte.toString()} atoms/B</strong>
-                  </span>
-                  <span>
-                    Total Fee (+20%): <strong className="text-gold">{batchEstimateResult.totalFee.toString()} atoms</strong>
-                  </span>
-                  <span>
-                    Total Gas: <strong className="text-fg">{batchEstimateResult.totalGasLimit.toString()}</strong>
-                  </span>
-                  {batchEstimateResult.startNonce !== undefined && (
-                    <span>
-                      Start Nonce: <strong className="text-fg">{batchEstimateResult.startNonce.toString()}</strong>
-                    </span>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {batchEstimateResult ? (
-              <div className="flex flex-col gap-1.5 font-mono text-[11px]">
-                {batchEstimateResult.calls.map((item: PreparedCallTransaction, idx: number) => (
-                  <div
-                    key={idx}
-                    data-testid={`batch-call-row-${idx}`}
-                    className="bg-surface border border-border/60 rounded px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2"
-                  >
-                    <span className="text-fg font-semibold">
-                      #{idx + 1} {item.call.method}
-                    </span>
-                    <div className="flex flex-wrap gap-x-4 text-muted">
-                      <span>
-                        Nonce: <strong className="text-fg">{item.nonce !== undefined ? item.nonce.toString() : "—"}</strong>
-                      </span>
-                      <span>
-                        Wire Size: <strong className="text-fg">{item.estimatedTxSize}B</strong>
-                      </span>
-                      <span>
-                        Fee: <strong className="text-gold">{item.fee.toString()} atoms</strong>
-                      </span>
-                      <span>
-                        Gas: <strong className="text-fg">{item.gasLimit.toString()}</strong>
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="flex flex-wrap gap-2 font-mono text-[11px] text-muted">
-                {batchQueue.map((queued, idx) => (
-                  <span
-                    key={idx}
-                    className="bg-surface border border-border/60 rounded px-2 py-1 text-fg"
-                  >
-                    #{idx + 1} {queued.method} ({bytesToHex(queued.args).slice(0, 12)}...)
-                  </span>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {preparedEstimate && (
-          <div
-            data-testid="prepared-estimate-summary"
-            className="bg-surface-2/80 border border-gold/30 rounded-lg p-3 text-xs font-mono flex flex-wrap gap-x-5 gap-y-1 text-muted"
-          >
-            <span>
-              Size: <strong className="text-fg">{preparedEstimate.estimatedTxSize}B</strong>
-            </span>
-            {preparedEstimate.feeRatePerByte !== undefined && (
-              <span>
-                Rate: <strong className="text-fg">{preparedEstimate.feeRatePerByte.toString()} atoms/B</strong>
-              </span>
-            )}
-            <span>
-              Fee (+20%): <strong className="text-gold">{preparedEstimate.fee.toString()} atoms</strong>
-            </span>
-            <span>
-              Gas Limit: <strong className="text-fg">{preparedEstimate.gasLimit.toString()}</strong>
-            </span>
-            {preparedEstimate.nonce !== undefined && (
-              <span>
-                Nonce: <strong className="text-fg">{preparedEstimate.nonce.toString()}</strong>
-              </span>
-            )}
-          </div>
-        )}
-
-        {errorMsg && (
+        {transferErrorMsg && (
           <div className="text-xs text-red-400 bg-red-950/40 p-3 rounded border border-red-800">
-            {errorMsg}
+            {transferErrorMsg}
           </div>
         )}
 
-        {/* Signed Output Card */}
-        {signedResult && (
-          <div className="bg-surface-2 p-4 rounded-lg border border-border flex flex-col gap-3 text-xs">
-            <div className="flex items-center justify-between border-b border-border/60 pb-2">
-              <span className="font-semibold text-fg">
-                Signed Bincode Envelope ({signedResult.txSize} Bytes)
-              </span>
-              <span className="font-mono text-gold text-[11px]">Domain: KVNC/tx/v1</span>
-            </div>
-
-            <div className="flex flex-col gap-1">
-              <span className="text-muted">Keyed BLAKE3 Sighash (32 bytes):</span>
-              <span className="font-mono text-fg break-all bg-surface p-2 rounded">
-                {signedResult.sighashHex}
-              </span>
-            </div>
-
-            <div className="flex flex-col gap-1">
-              <span className="text-muted">Ed25519 Signature (64 bytes):</span>
-              <span className="font-mono text-fg break-all bg-surface p-2 rounded">
-                {signedResult.signatureHex}
-              </span>
-            </div>
-
-            <div className="flex flex-col gap-1">
-              <div className="flex items-center justify-between">
-                <span className="text-muted">Raw Wire Payload (Bincode Hex):</span>
-                <button
-                  type="button"
-                  onClick={() => copyToClipboard(signedResult.rawTxHex, "tx")}
-                  className="text-subtle hover:text-fg font-medium"
-                >
-                  {copySuccess === "tx" ? "Copied!" : "Copy Hex"}
-                </button>
-              </div>
-              <textarea
-                readOnly
-                value={signedResult.rawTxHex}
-                rows={3}
-                className="w-full bg-surface p-2 rounded font-mono text-[11px] text-emerald-400 break-all resize-none border border-border/40"
-              />
-            </div>
-
-            <div className="flex items-center gap-3 mt-2">
-              <button
-                type="button"
-                onClick={handleBroadcast}
-                className="px-4 py-1.5 bg-surface-2 hover:bg-border rounded border border-border text-fg font-medium text-xs transition-colors"
-              >
-                Broadcast to Connected Node (kovanica_sendRawTransaction)
-              </button>
-              {broadcastStatus && (
-                <span className="text-xs text-muted font-mono">{broadcastStatus}</span>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* SDK v0.4.0 Contract State Bincode Decoder & Live Storage Slot Fetch */}
-      <div className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-4" data-testid="bincode-decoder-panel">
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
-          <div>
-            <h2 className="text-sm font-semibold text-fg">
-              Contract State Bincode Decoder (SDK v0.4.0)
-            </h2>
-            <p className="text-xs text-muted">
-              Live Storage Slot Fetch (<code className="font-mono text-fg">kovanica_getStorageAt</code>), canonical BLAKE3 slot derivation, and typed Bincode 1.x decoding
-            </p>
-          </div>
-          <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-surface-2 border border-border text-gold">
-            kovanica_getStorageAt
-          </span>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <div>
-            <label htmlFor="storage-contract-address" className="block text-xs font-medium text-muted mb-1">
-              Contract Address (PRO-21 <code className="font-mono">kvnc...dag</code> / <code className="font-mono">tknc...dag</code> or 32-byte hex)
-            </label>
-            <input
-              id="storage-contract-address"
-              data-testid="storage-contract-address"
-              type="text"
-              value={storageContractAddr}
-              onChange={(e) => setStorageContractAddr(e.target.value)}
-              placeholder="kvnc...dag or 0x..."
-              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-            />
-          </div>
-
-          <div>
-            <label htmlFor="decoder-kind-select" className="block text-xs font-medium text-muted mb-1">
-              Contract Record Type & Typed Decoder
-            </label>
-            <select
-              id="decoder-kind-select"
-              data-testid="decoder-kind-select"
-              value={decoderKind}
-              onChange={(e) => setDecoderKind(e.target.value as ContractDecoderKind)}
-              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-            >
-              <option value="name">NameRecord — decodeNameRecord (kvnc/v1/name/)</option>
-              <option value="htlc">HtlcRecord — decodeHtlcRecord (kvnc/v1/htlc/)</option>
-              <option value="escrow">EscrowRecord — decodeEscrowRecord (kvnc/v1/escrow/)</option>
-              <option value="vault">VaultRecord — decodeVaultRecord (kvnc/v1/vault/)</option>
-              <option value="token_metadata">TokenMetadata — decodeTokenMetadata (kvnc/v1/state)</option>
-              <option value="nft_metadata">NftMetadata — decodeNftMetadata (kvnc/v1/state)</option>
-              <option value="multisig">MultisigState — decodeMultisigState (kvnc/v1/state)</option>
-            </select>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <div>
-            <label htmlFor="decoder-custom-prefix" className="block text-xs font-medium text-muted mb-1">
-              Custom Storage Prefix (optional override)
-            </label>
-            <input
-              id="decoder-custom-prefix"
-              data-testid="decoder-custom-prefix"
-              type="text"
-              value={customSlotPrefix}
-              onChange={(e) => setCustomSlotPrefix(e.target.value)}
-              placeholder="e.g. kvnc/v1/name/ (defaults to record prefix)"
-              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-            />
-          </div>
-
-          <div className="md:col-span-2 flex flex-wrap items-end gap-2">
-            <div className="flex-1 min-w-[180px]">
-              <label htmlFor="decoder-slot-key" className="block text-xs font-medium text-muted mb-1">
-                Storage Slot Key (name / 32-byte hex ID; ignored for singleton <code className="font-mono">kvnc/v1/state</code> unless custom prefix set)
-              </label>
-              <input
-                id="decoder-slot-key"
-                data-testid="decoder-slot-key"
-                type="text"
-                value={slotKeyInput}
-                onChange={(e) => setSlotKeyInput(e.target.value)}
-                placeholder="alice or 64-char hex ID"
-                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-              />
-            </div>
-            <button
-              type="button"
-              data-testid="derive-slot-btn"
-              onClick={handleDeriveSlot}
-              className="px-3 py-2 bg-surface-2 hover:bg-border border border-border rounded-lg text-xs text-fg font-medium whitespace-nowrap transition-colors"
-            >
-              Derive Slot
-            </button>
-            <button
-              type="button"
-              data-testid="fetch-storage-slot-btn"
-              onClick={handleFetchAndDecodeStorage}
-              disabled={isFetchingStorage}
-              className="px-3.5 py-2 bg-gold hover:bg-gold/90 text-bg rounded-lg text-xs font-semibold whitespace-nowrap transition-colors disabled:opacity-50"
-            >
-              {isFetchingStorage ? "Fetching Storage..." : "Live Fetch & Decode (kovanica_getStorageAt)"}
-            </button>
-          </div>
-        </div>
-
-        {derivedSlotHex && (
-          <div
-            data-testid="derived-slot-hex"
-            className="bg-surface-2/80 border border-border rounded-lg px-3 py-2 text-xs font-mono text-emerald-400 break-all"
-          >
-            Derived BLAKE3 Slot (32B): 0x{derivedSlotHex}
-          </div>
-        )}
-
-        <div>
-          <label htmlFor="decoder-hex-input" className="block text-xs font-medium text-muted mb-1">
-            Raw Storage Value (Hex)
-          </label>
-          <textarea
-            id="decoder-hex-input"
-            data-testid="decoder-hex-input"
-            rows={2}
-            value={decoderHexInput}
-            onChange={(e) => setDecoderHexInput(e.target.value)}
-            placeholder="0x..."
-            className="w-full bg-surface-2 border border-border rounded-lg p-2.5 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-          />
-        </div>
-
-        <div className="flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            data-testid="decode-bincode-btn"
-            onClick={handleDecodeState}
-            className="px-4 py-2 bg-gold/20 hover:bg-gold/30 rounded-lg border border-gold/40 text-gold text-xs font-semibold transition-colors"
-          >
-            Decode Bincode State
-          </button>
-        </div>
-
-        {storageEmptyMsg && (
-          <div
-            data-testid="storage-empty-msg"
-            className="text-xs font-mono text-amber-300 bg-amber-950/30 border border-amber-800/50 rounded-lg p-3"
-          >
-            {storageEmptyMsg}
-          </div>
-        )}
-
-        {decoderError && (
-          <div
-            data-testid="decoder-error-msg"
-            className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3"
-          >
-            {decoderError}
-          </div>
-        )}
-
-        {decodedOutput && (
-          <pre
-            data-testid="decoded-json-output"
-            className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto"
-          >
-            {decodedOutput}
-          </pre>
-        )}
-      </div>
-
-      {/* Transaction Receipt Poller & Log Decoder (`kovanica_getTransactionReceipt`) */}
-      <div
-        className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-4"
-        data-testid="receipt-poller-panel"
-      >
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
-          <div>
-            <h2 className="text-sm font-semibold text-fg">
-              Transaction Receipt Poller & Log Decoder (kovanica_getTransactionReceipt)
-            </h2>
-            <p className="text-xs text-muted">
-              Poll <code className="font-mono text-fg">kovanica_getTransactionReceipt</code> until finalized and decode emitted Bincode 1.x log payloads
-            </p>
-          </div>
-          <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-surface-2 border border-border text-gold">
-            kovanica_getTransactionReceipt
-          </span>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
-          <div className="md:col-span-2">
-            <label
-              htmlFor="receipt-tx-hash-input"
-              className="block text-xs font-medium text-muted mb-1"
-            >
-              Transaction Hash (32-byte hex)
-            </label>
-            <input
-              id="receipt-tx-hash-input"
-              data-testid="receipt-tx-hash-input"
-              type="text"
-              value={receiptTxHash}
-              onChange={(e) => setReceiptTxHash(e.target.value)}
-              placeholder="0x... (64 hex characters)"
-              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-            />
-          </div>
-
-          <div>
-            <label
-              htmlFor="receipt-decoder-kind-select"
-              className="block text-xs font-medium text-muted mb-1"
-            >
-              Log Bincode Decoder Type (optional)
-            </label>
-            <select
-              id="receipt-decoder-kind-select"
-              data-testid="receipt-decoder-kind-select"
-              value={receiptDecoderKind}
-              onChange={(e) =>
-                setReceiptDecoderKind(e.target.value as ContractDecoderKind | "")
-              }
-              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-            >
-              <option value="">None (Raw Hex Logs Only)</option>
-              <option value="name">NameRecord — decodeNameRecord</option>
-              <option value="htlc">HtlcRecord — decodeHtlcRecord</option>
-              <option value="escrow">EscrowRecord — decodeEscrowRecord</option>
-              <option value="vault">VaultRecord — decodeVaultRecord</option>
-              <option value="token_metadata">TokenMetadata — decodeTokenMetadata</option>
-              <option value="nft_metadata">NftMetadata — decodeNftMetadata</option>
-              <option value="multisig">MultisigState — decodeMultisigState</option>
-            </select>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            data-testid="poll-receipt-btn"
-            disabled={isPollingReceipt}
-            onClick={async () => {
-              setReceiptPollError(null);
-              setReceiptPollResult(null);
-              setIsPollingReceipt(true);
-              try {
-                const res = await pollAndDecodeTransactionReceipt(client, {
-                  txHash: receiptTxHash,
-                  decoderKind: receiptDecoderKind || undefined,
-                });
-                setReceiptPollResult(res);
-              } catch (err: unknown) {
-                if (err instanceof KovanicaDecodeError) {
-                  setReceiptPollError(`[${err.code}] ${err.message}`);
-                } else {
-                  setReceiptPollError(
-                    err instanceof Error ? err.message : String(err),
-                  );
-                }
-              } finally {
-                setIsPollingReceipt(false);
-              }
-            }}
-            className="px-4 py-2 bg-gold hover:bg-gold/90 text-bg rounded-lg text-xs font-semibold transition-colors disabled:opacity-50"
-          >
-            {isPollingReceipt
-              ? "Polling Receipt..."
-              : "Fetch / Poll Receipt & Decode Logs"}
-          </button>
-        </div>
-
-        {receiptPollError && (
-          <div
-            data-testid="receipt-poller-error"
-            className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3"
-          >
-            {receiptPollError}
-          </div>
-        )}
-
-        {receiptPollResult && (
-          <div
-            data-testid="receipt-poller-result"
-            className="flex flex-col gap-3 text-xs"
-          >
-            <div
-              data-testid="receipt-poller-summary"
-              className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1.5 text-muted"
-            >
-              <span>
-                Status:{" "}
-                <strong
-                  data-testid="receipt-status-badge"
-                  className={
-                    receiptPollResult.status === "success"
-                      ? "text-emerald-400"
-                      : "text-red-400"
-                  }
-                >
-                  {receiptPollResult.status}
-                </strong>
-              </span>
-              <span>
-                Gas Used:{" "}
-                <strong data-testid="receipt-gas-used" className="text-fg">
-                  {receiptPollResult.gasUsed.toString()}
-                </strong>
-              </span>
-              <span>
-                Block Hash:{" "}
-                <strong
-                  data-testid="receipt-block-hash"
-                  className="text-fg break-all"
-                >
-                  {receiptPollResult.blockHash || "—"}
-                </strong>
-              </span>
-              <span>
-                Decoded Logs:{" "}
-                <strong className="text-gold">
-                  {receiptPollResult.decodedLogs.length}
-                </strong>
-              </span>
-            </div>
-
-            {receiptPollResult.decodedLogs.length > 0 && (
-              <pre
-                data-testid="receipt-decoded-logs"
-                className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto"
-              >
-                {JSON.stringify(
-                  receiptPollResult.decodedLogs,
-                  (_key, value) =>
-                    typeof value === "bigint" ? value.toString() : value,
-                  2,
-                )}
-              </pre>
-            )}
-
-            {receiptPollResult.decodeErrors.length > 0 && (
-              <div
-                data-testid="receipt-decode-errors"
-                className="text-xs font-mono text-amber-300 bg-amber-950/30 border border-amber-800/50 rounded-lg p-3"
-              >
-                {receiptPollResult.decodeErrors.map((e) => (
-                  <div key={e.logIndex}>
-                    Log #{e.logIndex} ({e.decoderKind}): {e.error}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* JSON-RPC 2.0 Batch Read Runner */}
-      <div
-        className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-4"
-        data-testid="jsonrpc-batch-runner-panel"
-      >
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
-          <div>
-            <h2 className="text-sm font-semibold text-fg">
-              JSON-RPC 2.0 Batch Read Runner (Single HTTP POST)
-            </h2>
-            <p className="text-xs text-muted">
-              Bundle 1..{MAX_JSONRPC_BATCH_SIZE} allowlisted read-only RPC calls into one{" "}
-              <code className="font-mono text-fg">client.callBatch</code> round-trip with per-item error isolation
-            </p>
-          </div>
-          <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-surface-2 border border-border text-gold">
-            max {MAX_JSONRPC_BATCH_SIZE} / batch
-          </span>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            data-testid="rpc-batch-preset-chain"
-            onClick={() => {
-              setRpcBatchInput(JSON.stringify(DEFAULT_JSONRPC_READ_BATCH_PRESET, null, 2));
-              setRpcBatchError(null);
-            }}
-            className="px-2.5 py-1 text-xs bg-surface-2 hover:bg-border rounded border border-border text-muted hover:text-fg transition-colors"
-          >
-            Chain Snapshot (chainId + blockNumber + estimateFee)
-          </button>
-          <button
-            type="button"
-            data-testid="rpc-batch-preset-health"
-            onClick={() => {
-              const healthPreset: JsonRpcBatchRequestItem[] = [
-                { method: "kovanica_chainId", params: [] },
-                { method: "kovanica_syncStatus", params: [] },
-                { method: "kovanica_getMiningInfo", params: [] },
-                { method: "kovanica_getDagTips", params: [] },
-              ];
-              setRpcBatchInput(JSON.stringify(healthPreset, null, 2));
-              setRpcBatchError(null);
-            }}
-            className="px-2.5 py-1 text-xs bg-surface-2 hover:bg-border rounded border border-border text-muted hover:text-fg transition-colors"
-          >
-            Node Health (chainId + syncStatus + miningInfo + dagTips)
-          </button>
-        </div>
-
-        <div className="flex flex-col gap-1.5">
-          <label
-            htmlFor="jsonrpc-batch-input"
-            className="block text-xs font-medium text-muted"
-          >
-            Batch Requests JSON Array (Read-Only Methods Only)
-          </label>
-          <textarea
-            id="jsonrpc-batch-input"
-            data-testid="jsonrpc-batch-input"
-            rows={5}
-            value={rpcBatchInput}
-            onChange={(e) => setRpcBatchInput(e.target.value)}
-            className="w-full bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-          />
-        </div>
-
-        <div className="flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            data-testid="run-jsonrpc-batch-btn"
-            disabled={isRunningRpcBatch}
-            onClick={async () => {
-              setRpcBatchError(null);
-              setRpcBatchSummary(null);
-              setIsRunningRpcBatch(true);
-              try {
-                let parsed: unknown;
-                try {
-                  parsed = JSON.parse(rpcBatchInput);
-                } catch (parseErr: unknown) {
-                  throw new KovanicaDecodeError(
-                    "INVALID_INPUT",
-                    `Malformed batch JSON: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
-                    { field: "requests" },
-                  );
-                }
-                const summary = await executeJsonRpcReadBatch(
-                  client,
-                  parsed as JsonRpcBatchRequestItem[],
-                );
-                setRpcBatchSummary(summary);
-              } catch (err: unknown) {
-                if (err instanceof KovanicaDecodeError) {
-                  setRpcBatchError(`[${err.code}] ${err.message}`);
-                } else {
-                  setRpcBatchError(err instanceof Error ? err.message : String(err));
-                }
-              } finally {
-                setIsRunningRpcBatch(false);
-              }
-            }}
-            className="px-4 py-2 bg-gold hover:bg-gold/90 text-bg rounded-lg text-xs font-semibold transition-colors disabled:opacity-50"
-          >
-            {isRunningRpcBatch
-              ? "Running Batch..."
-              : "Run JSON-RPC Batch (Single HTTP POST)"}
-          </button>
-        </div>
-
-        {rpcBatchError && (
-          <div
-            data-testid="jsonrpc-batch-error"
-            className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3"
-          >
-            {rpcBatchError}
-          </div>
-        )}
-
-        {rpcBatchSummary && (
-          <div
-            data-testid="jsonrpc-batch-result"
-            className="flex flex-col gap-3 text-xs"
-          >
-            <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1.5 text-muted">
-              <span>
-                Total: <strong className="text-fg">{rpcBatchSummary.totalRequests}</strong>
-              </span>
-              <span>
-                OK: <strong className="text-emerald-400">{rpcBatchSummary.succeededCount}</strong>
-              </span>
-              <span>
-                Failed: <strong className="text-red-400">{rpcBatchSummary.failedCount}</strong>
-              </span>
-              <span>
-                Elapsed: <strong className="text-gold">{rpcBatchSummary.elapsedMs} ms</strong>
-              </span>
-            </div>
-
-            <div className="flex flex-col gap-2">
-              {rpcBatchSummary.items.map((item) => (
-                <div
-                  key={item.index}
-                  className={`p-3 rounded-lg border font-mono text-xs flex flex-col gap-1.5 ${
-                    item.ok
-                      ? "bg-surface-2 border-border text-fg"
-                      : "bg-red-950/30 border-red-800/50 text-red-200"
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-semibold">
-                      #{item.index + 1} {item.method}
-                    </span>
-                    <span
-                      className={`text-[11px] uppercase font-bold ${
-                        item.ok ? "text-emerald-400" : "text-red-400"
-                      }`}
-                    >
-                      {item.ok ? "OK" : "ERROR"}
-                    </span>
-                  </div>
-                  <pre className="text-[11px] overflow-x-auto text-muted">
-                    {JSON.stringify(
-                      item.ok ? item.result : item.error,
-                      (_key, value) =>
-                        typeof value === "bigint" ? value.toString() : value,
-                      2,
-                    )}
-                  </pre>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Typed Contract Facades Studio */}
-      <div
-        className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-4"
-        data-testid="typed-facades-studio-panel"
-      >
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
-          <div>
-            <h2 className="text-sm font-semibold text-fg">
-              Typed Contract Facades Studio (7 Canonical Clients)
-            </h2>
-            <p className="text-xs text-muted">
-              Invoke <code className="font-mono text-fg">runTypedFacadeRead</code> across NameRegistry, Token, NFT, Escrow, HTLC, Vault, and Multisig SDK clients
-            </p>
-          </div>
-          <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-surface-2 border border-border text-gold">
-            7 SDK Facades
-          </span>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
-          <div>
-            <label
-              htmlFor="facade-kind-select"
-              className="block text-xs font-medium text-muted mb-1"
-            >
-              Contract Facade
-            </label>
-            <select
-              id="facade-kind-select"
-              data-testid="facade-kind-select"
-              value={facadeKind}
-              onChange={(e) => {
-                setFacadeKind(e.target.value as TypedFacadeKind);
-                setFacadeReadResult(null);
-                setFacadeReadError(null);
-              }}
-              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-            >
-              <option value="name">name — NameRegistryClient.getRecord</option>
-              <option value="token">token — TokenClient.getMetadata</option>
-              <option value="nft">nft — NftClient.getMetadata</option>
-              <option value="escrow">escrow — EscrowClient.getEscrow</option>
-              <option value="htlc">htlc — HtlcClient.getHtlc</option>
-              <option value="vault">vault — VaultClient.getVault</option>
-              <option value="multisig">multisig — MultisigClient.getState</option>
-            </select>
-          </div>
-
-          <div>
-            <label
-              htmlFor="facade-contract-input"
-              className="block text-xs font-medium text-muted mb-1"
-            >
-              Contract Address (PRO-21 or 32-byte hex)
-            </label>
-            <input
-              id="facade-contract-input"
-              data-testid="facade-contract-input"
-              type="text"
-              value={facadeContractInput}
-              onChange={(e) => setFacadeContractInput(e.target.value)}
-              placeholder="0x... or kvnc..."
-              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-            />
-          </div>
-
-          <div>
-            <label
-              htmlFor="facade-key-input"
-              className="block text-xs font-medium text-muted mb-1"
-            >
-              Record Key{" "}
-              {facadeKind === "token" || facadeKind === "nft" || facadeKind === "multisig"
-                ? "(singleton — not required)"
-                : facadeKind === "name"
-                  ? "(name string)"
-                  : "(32-byte ID hex)"}
-            </label>
-            <input
-              id="facade-key-input"
-              data-testid="facade-key-input"
-              type="text"
-              value={facadeKeyInput}
-              onChange={(e) => setFacadeKeyInput(e.target.value)}
-              disabled={
-                facadeKind === "token" || facadeKind === "nft" || facadeKind === "multisig"
-              }
-              placeholder={
-                facadeKind === "name"
-                  ? "alice"
-                  : facadeKind === "token" || facadeKind === "nft" || facadeKind === "multisig"
-                    ? "Singleton state"
-                    : "0x... (64 hex chars)"
-              }
-              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold disabled:opacity-50"
-            />
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            data-testid="run-facade-read-btn"
-            disabled={isReadingFacade}
-            onClick={async () => {
-              setFacadeReadError(null);
-              setFacadeReadResult(null);
-              setIsReadingFacade(true);
-              try {
-                const res = await runTypedFacadeRead(client, {
-                  facade: facadeKind,
-                  contract: facadeContractInput,
-                  key:
-                    facadeKind === "token" ||
-                    facadeKind === "nft" ||
-                    facadeKind === "multisig"
-                      ? undefined
-                      : facadeKeyInput,
-                });
-                setFacadeReadResult(res);
-              } catch (err: unknown) {
-                if (err instanceof KovanicaDecodeError) {
-                  setFacadeReadError(`[${err.code}] ${err.message}`);
-                } else {
-                  setFacadeReadError(err instanceof Error ? err.message : String(err));
-                }
-              } finally {
-                setIsReadingFacade(false);
-              }
-            }}
-            className="px-4 py-2 bg-gold hover:bg-gold/90 text-bg rounded-lg text-xs font-semibold transition-colors disabled:opacity-50"
-          >
-            {isReadingFacade ? "Reading Facade..." : "Run Typed Facade Read"}
-          </button>
-        </div>
-
-        {facadeReadError && (
-          <div
-            data-testid="facade-read-error"
-            className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3"
-          >
-            {facadeReadError}
-          </div>
-        )}
-
-        {facadeReadResult && (
-          <div
-            data-testid="facade-read-result"
-            className="flex flex-col gap-2 text-xs"
-          >
-            <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1 text-muted">
-              <span>
-                Method: <strong className="text-gold">{facadeReadResult.method}</strong>
-              </span>
-              <span>
-                Status:{" "}
-                <strong
-                  className={
-                    facadeReadResult.found ? "text-emerald-400" : "text-amber-300"
-                  }
-                >
-                  {facadeReadResult.found ? "found" : "empty (null)"}
-                </strong>
-              </span>
-            </div>
-            <pre
-              data-testid="facade-read-json"
-              className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto"
-            >
-              {JSON.stringify(
-                facadeReadResult.record,
-                (_key, value) =>
-                  typeof value === "bigint" ? value.toString() : value,
-                2,
-              )}
-            </pre>
-          </div>
-        )}
-      </div>
-
-      {/* Contract Log History & Failover RPC Panel */}
-      <div
-        className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-5"
-        data-testid="log-history-panel"
-      >
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
-          <div>
-            <h2 className="text-sm font-semibold text-fg">
-              Contract Log History &amp; Failover RPC
-            </h2>
-            <p className="text-xs text-muted">
-              Query chunked <code className="font-mono text-fg">kovanica_getLogs</code> history with optional Bincode decoding and probe multi-endpoint RPC failover
-            </p>
-          </div>
-          <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-surface-2 border border-border text-gold">
-            Chunked Logs + Failover
-          </span>
-        </div>
-
-        {/* Chunked Contract Log History Explorer */}
-        <div className="flex flex-col gap-3">
-          <h3 className="text-xs font-semibold text-muted uppercase tracking-wider">
-            Contract Log History Explorer
-          </h3>
-          <div className="grid grid-cols-1 md:grid-cols-5 gap-3 items-end">
-            <div>
-              <label
-                htmlFor="log-from-block-input"
-                className="block text-xs font-medium text-muted mb-1"
-              >
-                From Block
-              </label>
-              <input
-                id="log-from-block-input"
-                data-testid="log-from-block-input"
-                type="text"
-                value={logFromBlockStr}
-                onChange={(e) => setLogFromBlockStr(e.target.value)}
-                placeholder="0"
-                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-              />
-            </div>
-
-            <div>
-              <label
-                htmlFor="log-to-block-input"
-                className="block text-xs font-medium text-muted mb-1"
-              >
-                To Block
-              </label>
-              <input
-                id="log-to-block-input"
-                data-testid="log-to-block-input"
-                type="text"
-                value={logToBlockStr}
-                onChange={(e) => setLogToBlockStr(e.target.value)}
-                placeholder="1000"
-                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-              />
-            </div>
-
-            <div>
-              <label
-                htmlFor="log-chunk-size-input"
-                className="block text-xs font-medium text-muted mb-1"
-              >
-                Chunk Size
-              </label>
-              <input
-                id="log-chunk-size-input"
-                data-testid="log-chunk-size-input"
-                type="number"
-                min={1}
-                value={logChunkSizeStr}
-                onChange={(e) => setLogChunkSizeStr(e.target.value)}
-                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-              />
-            </div>
-
-            <div>
-              <label
-                htmlFor="log-address-input"
-                className="block text-xs font-medium text-muted mb-1"
-              >
-                Contract Address (optional)
-              </label>
-              <input
-                id="log-address-input"
-                data-testid="log-address-input"
-                type="text"
-                value={logAddressInput}
-                onChange={(e) => setLogAddressInput(e.target.value)}
-                placeholder="0x... or kvnc..."
-                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-              />
-            </div>
-
-            <div>
-              <label
-                htmlFor="log-decoder-select"
-                className="block text-xs font-medium text-muted mb-1"
-              >
-                Bincode Decoder (optional)
-              </label>
-              <select
-                id="log-decoder-select"
-                data-testid="log-decoder-select"
-                value={logDecoderKind}
-                onChange={(e) => setLogDecoderKind(e.target.value as ContractLogKind | "")}
-                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-              >
-                <option value="">Raw logs only</option>
-                <option value="name">name</option>
-                <option value="htlc">htlc</option>
-                <option value="escrow">escrow</option>
-                <option value="vault">vault</option>
-                <option value="token_metadata">token_metadata</option>
-                <option value="token_pool">token_pool</option>
-                <option value="nft_metadata">nft_metadata</option>
-                <option value="multisig_state">multisig_state</option>
-                <option value="multisig_tx">multisig_tx</option>
-              </select>
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              data-testid="run-log-history-btn"
-              disabled={isQueryingLogs}
-              onClick={async () => {
-                setLogHistoryError(null);
-                setLogHistoryResult(null);
-                setIsQueryingLogs(true);
-                try {
-                  const parsedChunk = Number.parseInt(logChunkSizeStr.trim(), 10);
-                  const res = await runContractLogHistoryQuery(client, {
-                    fromBlock: logFromBlockStr,
-                    toBlock: logToBlockStr,
-                    address: logAddressInput.trim() || undefined,
-                    decoderKind: logDecoderKind || undefined,
-                    chunkSize: Number.isFinite(parsedChunk) ? parsedChunk : undefined,
-                  });
-                  setLogHistoryResult(res);
-                } catch (err: unknown) {
-                  if (err instanceof KovanicaDecodeError) {
-                    setLogHistoryError(`[${err.code}] ${err.message}`);
-                  } else {
-                    setLogHistoryError(err instanceof Error ? err.message : String(err));
-                  }
-                } finally {
-                  setIsQueryingLogs(false);
-                }
-              }}
-              className="px-4 py-2 bg-gold hover:bg-gold/90 text-bg rounded-lg text-xs font-semibold transition-colors disabled:opacity-50"
-            >
-              {isQueryingLogs ? "Querying Logs..." : "Query Log History"}
-            </button>
-          </div>
-
-          {logHistoryError && (
-            <div
-              data-testid="log-history-error"
-              className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3"
-            >
-              {logHistoryError}
-            </div>
-          )}
-
-          {logHistoryResult && (
-            <div data-testid="log-history-result" className="flex flex-col gap-2 text-xs">
-              <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1 text-muted">
-                <span>
-                  Range: <strong className="text-fg">{logHistoryResult.fromBlock}..{logHistoryResult.toBlock}</strong>
-                </span>
-                <span>
-                  Chunks: <strong className="text-gold">{logHistoryResult.chunksQueried}</strong>
-                </span>
-                <span>
-                  Logs: <strong className="text-fg">{logHistoryResult.totalLogs}</strong>
-                </span>
-                <span>
-                  Decoded: <strong className="text-emerald-400">{logHistoryResult.decodedCount}</strong>
-                </span>
-              </div>
-              <pre
-                data-testid="log-history-json"
-                className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto max-h-72"
-              >
-                {JSON.stringify(logHistoryResult, null, 2)}
-              </pre>
-            </div>
-          )}
-        </div>
-
-        {/* Multi-Endpoint Failover RPC Probe */}
-        <div className="flex flex-col gap-3 border-t border-border pt-4">
-          <h3 className="text-xs font-semibold text-muted uppercase tracking-wider">
-            Failover RPC Endpoint Probe
-          </h3>
-          <div>
-            <label
-              htmlFor="failover-urls-input"
-              className="block text-xs font-medium text-muted mb-1"
-            >
-              RPC Endpoints (comma or newline separated, primary first)
-            </label>
-            <textarea
-              id="failover-urls-input"
-              data-testid="failover-urls-input"
-              rows={3}
-              value={failoverUrlsInput}
-              onChange={(e) => setFailoverUrlsInput(e.target.value)}
-              placeholder={"https://primary-rpc.example/rpc\nhttps://secondary-rpc.example/rpc"}
-              className="w-full bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-            />
-          </div>
-
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              data-testid="run-failover-probe-btn"
-              disabled={isProbingFailover}
-              onClick={async () => {
-                setIsProbingFailover(true);
-                setFailoverProbeResult(null);
-                try {
-                  const res = await probeFailoverRpcEndpoints(failoverUrlsInput);
-                  setFailoverProbeResult(res);
-                } finally {
-                  setIsProbingFailover(false);
-                }
-              }}
-              className="px-4 py-2 bg-gold/20 hover:bg-gold/30 rounded-lg border border-gold/40 text-gold text-xs font-semibold transition-colors disabled:opacity-50"
-            >
-              {isProbingFailover ? "Probing Endpoints..." : "Probe Failover Endpoints"}
-            </button>
-          </div>
-
-          {failoverProbeResult && (
-            <div data-testid="failover-probe-result" className="flex flex-col gap-2 text-xs">
-              <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1 text-muted">
-                <span>
-                  Status:{" "}
-                  <strong
-                    className={
-                      failoverProbeResult.ok ? "text-emerald-400" : "text-red-400"
-                    }
-                  >
-                    {failoverProbeResult.ok ? "OK" : "FAILED"}
-                  </strong>
-                </span>
-                {failoverProbeResult.chainId !== undefined && (
-                  <span>
-                    Chain ID: <strong className="text-fg">{failoverProbeResult.chainId}</strong>
-                  </span>
-                )}
-                {failoverProbeResult.blockNumber !== undefined && (
-                  <span>
-                    Block: <strong className="text-gold">{failoverProbeResult.blockNumber}</strong>
-                  </span>
-                )}
-                <span>
-                  Failovers: <strong className="text-fg">{failoverProbeResult.failoverEvents.length}</strong>
-                </span>
-              </div>
-
-              {failoverProbeResult.error && (
-                <div className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3">
-                  {failoverProbeResult.error}
-                </div>
-              )}
-
-              {failoverProbeResult.activeEndpoints.length > 0 && (
-                <div className="flex flex-col gap-1.5">
-                  {failoverProbeResult.activeEndpoints.map((ep, idx) => (
-                    <div
-                      key={`${ep.url}-${idx}`}
-                      className="bg-surface-2 border border-border rounded-lg px-3 py-2 font-mono flex flex-wrap items-center justify-between gap-2"
-                    >
-                      <span className="text-fg break-all">{ep.url}</span>
-                      <div className="flex items-center gap-3 text-[11px]">
-                        <span
-                          className={
-                            ep.healthy ? "text-emerald-400" : "text-red-400"
-                          }
-                        >
-                          {ep.state} ({ep.healthy ? "healthy" : "cooldown"})
-                        </span>
-                        <span className="text-muted">
-                          ok:{ep.totalSuccesses} err:{ep.totalFailures}
-                        </span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Raw Wire Tx Decoder & Node Capability Probe Panel */}
-      <div
-        className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-5"
-        data-testid="raw-tx-and-probe-panel"
-      >
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
-          <div>
-            <h2 className="text-sm font-semibold text-fg">
-              Raw Wire Tx Decoder &amp; Node Capability Probe
-            </h2>
-            <p className="text-xs text-muted">
-              Decode signed Call transactions offline with RFC 8032 Ed25519 verification and probe any RPC endpoint for network-tag headers, batch support, and latency
-            </p>
-          </div>
-          <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-surface-2 border border-border text-gold">
-            Offline Decode + RPC Probe
-          </span>
-        </div>
-
-        {/* Offline Raw Wire Tx Decoder */}
-        <div className="flex flex-col gap-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3 className="text-xs font-semibold text-muted uppercase tracking-wider">
-              Offline Raw Wire Tx Decoder
-            </h3>
-            {signedResult?.rawTxHex && (
-              <button
-                type="button"
-                data-testid="load-signed-raw-tx-btn"
-                onClick={() => {
-                  setRawTxHexInput(signedResult.rawTxHex);
-                  setRawTxChainIdStr(String(selectedChainId));
-                  setRawTxInspectError(null);
-                }}
-                className="px-2.5 py-1 text-xs bg-surface-2 hover:bg-border rounded border border-border text-muted hover:text-fg transition-colors"
-              >
-                Load Last Signed Tx
-              </button>
-            )}
-          </div>
-
-          <textarea
-            id="raw-tx-hex-input"
-            data-testid="raw-tx-hex-input"
-            rows={3}
-            value={rawTxHexInput}
-            onChange={(e) => setRawTxHexInput(e.target.value)}
-            placeholder="Paste raw signed Call transaction hex (0x... or bare hex)..."
-            className="w-full bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-          />
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
-            <div>
-              <label
-                htmlFor="raw-tx-chain-id-input"
-                className="block text-xs font-medium text-muted mb-1"
-              >
-                Chain ID (for sighash)
-              </label>
-              <input
-                id="raw-tx-chain-id-input"
-                data-testid="raw-tx-chain-id-input"
-                type="number"
-                min={0}
-                value={rawTxChainIdStr}
-                onChange={(e) => setRawTxChainIdStr(e.target.value)}
-                placeholder={String(selectedChainId)}
-                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-              />
-            </div>
-
-            <div className="md:col-span-2">
-              <label
-                htmlFor="raw-tx-pubkey-input"
-                className="block text-xs font-medium text-muted mb-1"
-              >
-                Signer Public Key Hex Override (optional, defaults to tx sender)
-              </label>
-              <input
-                id="raw-tx-pubkey-input"
-                data-testid="raw-tx-pubkey-input"
-                type="text"
-                value={rawTxPubkeyHex}
-                onChange={(e) => setRawTxPubkeyHex(e.target.value)}
-                placeholder="64-char hex pubkey (optional)"
-                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-              />
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              data-testid="decode-raw-tx-btn"
-              onClick={() => {
-                setRawTxInspectError(null);
-                setInspectedRawTx(null);
-                try {
-                  const trimmedChain = rawTxChainIdStr.trim();
-                  const parsedChainId =
-                    trimmedChain.length > 0 ? BigInt(trimmedChain) : BigInt(selectedChainId);
-                  const inspected = inspectRawSignedCallTx(rawTxHexInput, {
-                    chainId: parsedChainId,
-                    publicKeyHex: rawTxPubkeyHex.trim() || undefined,
-                  });
-                  setInspectedRawTx(inspected);
-                } catch (err: unknown) {
-                  if (err instanceof KovanicaDecodeError) {
-                    setRawTxInspectError(`[${err.code}] ${err.message}`);
-                  } else {
-                    setRawTxInspectError(err instanceof Error ? err.message : String(err));
-                  }
-                }
-              }}
-              className="px-4 py-2 bg-gold hover:bg-gold/90 text-bg rounded-lg text-xs font-semibold transition-colors"
-            >
-              Decode &amp; Verify Tx
-            </button>
-          </div>
-
-          {rawTxInspectError && (
-            <div
-              data-testid="raw-tx-decode-error"
-              className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3"
-            >
-              {rawTxInspectError}
-            </div>
-          )}
-
-          {inspectedRawTx && (
-            <div data-testid="raw-tx-decode-result" className="flex flex-col gap-2 text-xs">
-              <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1 text-muted">
-                <span>
-                  Signature:{" "}
-                  <strong
-                    data-testid="raw-tx-sig-status"
-                    className={
-                      inspectedRawTx.signatureValid ? "text-emerald-400" : "text-red-400"
-                    }
-                  >
-                    {inspectedRawTx.signatureValid ? "VALID" : "INVALID"}
-                  </strong>
-                </span>
-                <span>
-                  Method: <strong className="text-gold">{inspectedRawTx.method}</strong>
-                </span>
-                <span>
-                  Nonce: <strong className="text-fg">{inspectedRawTx.nonce}</strong>
-                </span>
-                <span>
-                  Fee: <strong className="text-fg">{inspectedRawTx.fee}</strong>
-                </span>
-                <span>
-                  Size: <strong className="text-fg">{inspectedRawTx.wireSizeBytes}B</strong>
-                </span>
-              </div>
-              <pre
-                data-testid="raw-tx-decode-json"
-                className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto max-h-72"
-              >
-                {JSON.stringify(inspectedRawTx, null, 2)}
-              </pre>
-            </div>
-          )}
-        </div>
-
-        {/* RPC Node Capability Probe */}
-        <div className="flex flex-col gap-3 border-t border-border pt-4">
-          <h3 className="text-xs font-semibold text-muted uppercase tracking-wider">
-            RPC Node Capability Probe
-          </h3>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
-            <div className="md:col-span-2">
-              <label
-                htmlFor="node-probe-url-input"
-                className="block text-xs font-medium text-muted mb-1"
-              >
-                Target RPC Endpoint URL
-              </label>
-              <input
-                id="node-probe-url-input"
-                data-testid="node-probe-url-input"
-                type="text"
-                value={nodeProbeUrlInput}
-                onChange={(e) => setNodeProbeUrlInput(e.target.value)}
-                placeholder="http://127.0.0.1:8545/rpc"
-                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-              />
-            </div>
-
-            <div>
-              <label
-                htmlFor="node-probe-expected-chain-input"
-                className="block text-xs font-medium text-muted mb-1"
-              >
-                Expected Chain ID (optional)
-              </label>
-              <input
-                id="node-probe-expected-chain-input"
-                data-testid="node-probe-expected-chain-input"
-                type="number"
-                min={0}
-                value={nodeProbeExpectedChainStr}
-                onChange={(e) => setNodeProbeExpectedChainStr(e.target.value)}
-                placeholder="any"
-                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-              />
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              data-testid="run-node-probe-btn"
-              disabled={isProbingNode}
-              onClick={async () => {
-                setIsProbingNode(true);
-                setNodeProbeResult(null);
-                try {
-                  const trimmedExpected = nodeProbeExpectedChainStr.trim();
-                  const expectedChainId =
-                    trimmedExpected.length > 0 ? BigInt(trimmedExpected) : undefined;
-                  const res = await runNodeCapabilityProbe(nodeProbeUrlInput.trim(), {
-                    ...(expectedChainId !== undefined ? { expectedChainId } : {}),
-                  });
-                  setNodeProbeResult(res);
-                } catch (err: unknown) {
-                  setNodeProbeResult({
-                    ok: false,
-                    url: nodeProbeUrlInput.trim(),
-                    batchSupported: false,
-                    canonicalTagMatch: null,
-                    latencyMs: 0,
-                    error: err instanceof Error ? err.message : String(err),
-                  });
-                } finally {
-                  setIsProbingNode(false);
-                }
-              }}
-              className="px-4 py-2 bg-gold/20 hover:bg-gold/30 rounded-lg border border-gold/40 text-gold text-xs font-semibold transition-colors disabled:opacity-50"
-            >
-              {isProbingNode ? "Probing Node..." : "Probe Node Capabilities"}
-            </button>
-          </div>
-
-          {nodeProbeResult && (
-            <div data-testid="node-probe-result" className="flex flex-col gap-2 text-xs">
-              <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1 text-muted">
-                <span>
-                  Status:{" "}
-                  <strong
-                    className={
-                      nodeProbeResult.ok ? "text-emerald-400" : "text-red-400"
-                    }
-                  >
-                    {nodeProbeResult.ok ? "OK" : "FAILED"}
-                  </strong>
-                </span>
-                <span>
-                  Network Tag:{" "}
-                  <strong className="text-fg">
-                    {nodeProbeResult.networkTag ?? "—"}
-                  </strong>
-                  {nodeProbeResult.canonicalTagMatch !== null && (
-                    <span
-                      className={
-                        nodeProbeResult.canonicalTagMatch
-                          ? " text-emerald-400"
-                          : " text-red-400"
-                      }
-                    >
-                      {" "}
-                      ({nodeProbeResult.canonicalTagMatch ? "canonical" : "mismatch"})
-                    </span>
-                  )}
-                </span>
-                <span>
-                  RPC Version:{" "}
-                  <strong className="text-fg">
-                    {nodeProbeResult.rpcVersion ?? "—"}
-                  </strong>
-                </span>
-                <span>
-                  Batch:{" "}
-                  <strong
-                    className={
-                      nodeProbeResult.batchSupported ? "text-emerald-400" : "text-amber-400"
-                    }
-                  >
-                    {nodeProbeResult.batchSupported ? "Supported" : "Unsupported"}
-                  </strong>
-                </span>
-                <span>
-                  Latency:{" "}
-                  <strong className="text-gold">{nodeProbeResult.latencyMs} ms</strong>
-                </span>
-              </div>
-
-              {nodeProbeResult.error && (
-                <div className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3">
-                  {nodeProbeResult.error}
-                </div>
-              )}
-
-              <pre
-                data-testid="node-probe-json"
-                className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto max-h-72"
-              >
-                {JSON.stringify(nodeProbeResult, null, 2)}
-              </pre>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Address Inspector & Transfer Tx Verifier Panel */}
-      <div
-        className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-5"
-        data-testid="address-and-transfer-panel"
-      >
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
-          <div>
-            <h2 className="text-sm font-semibold text-fg">
-              Address Inspector &amp; Transfer Tx Verifier
-            </h2>
-            <p className="text-xs text-muted">
-              Inspect PRO-21 (kvnc...dag / tknc...dag) or legacy 64-hex addresses against Chain 1/2/3 policy and verify raw signed Transfer transactions offline
-            </p>
-          </div>
-          <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-surface-2 border border-border text-gold">
-            PRO-21 + Ed25519
-          </span>
-        </div>
-
-        {/* Address Inspector */}
-        <div className="flex flex-col gap-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3 className="text-xs font-semibold text-muted uppercase tracking-wider">
-              Address Inspector (Chain 1 / 2 / 3 Policy)
-            </h3>
-            {activeAccount && (
-              <button
-                type="button"
-                data-testid="load-active-address-btn"
-                onClick={() => {
-                  setAddressInspectInput(activeAccount.address);
-                  setAddressInspectChainStr(String(selectedChainId));
-                }}
-                className="px-2.5 py-1 text-xs bg-surface-2 hover:bg-border rounded border border-border text-muted hover:text-fg transition-colors"
-              >
-                Use Active Account Address
-              </button>
-            )}
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
-            <div className="md:col-span-2">
-              <label
-                htmlFor="address-inspect-input"
-                className="block text-xs font-medium text-muted mb-1"
-              >
-                Address (kvnc...dag, tknc...dag, or 64-hex)
-              </label>
-              <input
-                id="address-inspect-input"
-                data-testid="address-inspect-input"
-                type="text"
-                value={addressInspectInput}
-                onChange={(e) => setAddressInspectInput(e.target.value)}
-                placeholder="kvnc...dag, tknc...dag, or 0x..."
-                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-              />
-            </div>
-
-            <div>
-              <label
-                htmlFor="address-inspect-chain-select"
-                className="block text-xs font-medium text-muted mb-1"
-              >
-                Chain Policy
-              </label>
-              <select
-                id="address-inspect-chain-select"
-                data-testid="address-inspect-chain-select"
-                value={addressInspectChainStr}
-                onChange={(e) => setAddressInspectChainStr(e.target.value)}
-                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-              >
-                <option value="">Any (no chain policy)</option>
-                <option value="1">Mainnet (Chain 1)</option>
-                <option value="2">Testnet (Chain 2)</option>
-                <option value="3">Devnet (Chain 3)</option>
-              </select>
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              data-testid="inspect-address-btn"
-              onClick={() => {
-                const expectedChainId =
-                  addressInspectChainStr.trim().length > 0
-                    ? Number(addressInspectChainStr)
-                    : undefined;
-                setAddressInspectResult(inspectAddress(addressInspectInput, expectedChainId));
-              }}
-              className="px-4 py-2 bg-gold hover:bg-gold/90 text-bg rounded-lg text-xs font-semibold transition-colors"
-            >
-              Inspect Address
-            </button>
-          </div>
-
-          {addressInspectResult && (
-            <div data-testid="address-inspect-result" className="flex flex-col gap-2 text-xs">
-              <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1 text-muted">
-                <span>
-                  Valid:{" "}
-                  <strong
-                    data-testid="address-inspect-valid"
-                    className={addressInspectResult.valid ? "text-emerald-400" : "text-red-400"}
-                  >
-                    {addressInspectResult.valid ? "YES" : "NO"}
-                  </strong>
-                </span>
-                <span>
-                  Format: <strong className="text-gold">{addressInspectResult.format}</strong>
-                </span>
-                <span>
-                  Checksum:{" "}
-                  <strong
-                    className={
-                      addressInspectResult.checksumValid ? "text-emerald-400" : "text-red-400"
-                    }
-                  >
-                    {addressInspectResult.checksumValid ? "VALID" : "INVALID"}
-                  </strong>
-                </span>
-                <span>
-                  Chain Allowed:{" "}
-                  <strong
-                    className={
-                      addressInspectResult.chainAllowed === null
-                        ? "text-muted"
-                        : addressInspectResult.chainAllowed
-                          ? "text-emerald-400"
-                          : "text-red-400"
-                    }
-                  >
-                    {addressInspectResult.chainAllowed === null
-                      ? "N/A"
-                      : addressInspectResult.chainAllowed
-                        ? "ALLOWED"
-                        : "REJECTED"}
-                  </strong>
-                </span>
-              </div>
-
-              {addressInspectResult.error && (
-                <div className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3">
-                  {addressInspectResult.error}
-                </div>
-              )}
-
-              <pre
-                data-testid="address-inspect-json"
-                className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto max-h-60"
-              >
-                {JSON.stringify(addressInspectResult, null, 2)}
-              </pre>
-            </div>
-          )}
-        </div>
-
-        {/* Offline Transfer Tx Verifier */}
-        <div className="flex flex-col gap-3 border-t border-border pt-4">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3 className="text-xs font-semibold text-muted uppercase tracking-wider">
-              Offline Signed Transfer Tx Verifier
-            </h3>
-            {signedResult?.rawTxHex && txType === "transfer" && (
-              <button
-                type="button"
-                data-testid="load-signed-transfer-tx-btn"
-                onClick={() => {
-                  setTransferTxHexInput(signedResult.rawTxHex);
-                  setTransferTxChainIdStr(String(selectedChainId));
-                  setTransferTxInspectError(null);
-                }}
-                className="px-2.5 py-1 text-xs bg-surface-2 hover:bg-border rounded border border-border text-muted hover:text-fg transition-colors"
-              >
-                Load Last Signed Transfer
-              </button>
-            )}
-          </div>
-
-          <textarea
-            id="transfer-tx-hex-input"
-            data-testid="transfer-tx-hex-input"
-            rows={3}
-            value={transferTxHexInput}
-            onChange={(e) => setTransferTxHexInput(e.target.value)}
-            placeholder="Paste raw signed Transfer transaction hex (0x... or bare 196-byte hex)..."
-            className="w-full bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-          />
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
-            <div>
-              <label
-                htmlFor="transfer-tx-chain-id-input"
-                className="block text-xs font-medium text-muted mb-1"
-              >
-                Chain ID (for sighash)
-              </label>
-              <input
-                id="transfer-tx-chain-id-input"
-                data-testid="transfer-tx-chain-id-input"
-                type="number"
-                min={0}
-                value={transferTxChainIdStr}
-                onChange={(e) => setTransferTxChainIdStr(e.target.value)}
-                placeholder={String(selectedChainId)}
-                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-              />
-            </div>
-
-            <div className="md:col-span-2">
-              <label
-                htmlFor="transfer-tx-pubkey-input"
-                className="block text-xs font-medium text-muted mb-1"
-              >
-                Signer Public Key Hex Override (optional, defaults to tx sender)
-              </label>
-              <input
-                id="transfer-tx-pubkey-input"
-                data-testid="transfer-tx-pubkey-input"
-                type="text"
-                value={transferTxPubkeyHex}
-                onChange={(e) => setTransferTxPubkeyHex(e.target.value)}
-                placeholder="64-char hex pubkey (optional)"
-                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
-              />
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              data-testid="decode-transfer-tx-btn"
-              onClick={() => {
-                setTransferTxInspectError(null);
-                setInspectedTransferTx(null);
-                try {
-                  const trimmedChain = transferTxChainIdStr.trim();
-                  const parsedChainId =
-                    trimmedChain.length > 0 ? BigInt(trimmedChain) : BigInt(selectedChainId);
-                  const inspected = inspectRawSignedTransferTx(transferTxHexInput, {
-                    chainId: parsedChainId,
-                    publicKeyHex: transferTxPubkeyHex.trim() || undefined,
-                  });
-                  setInspectedTransferTx(inspected);
-                } catch (err: unknown) {
-                  if (err instanceof KovanicaDecodeError) {
-                    setTransferTxInspectError(`[${err.code}] ${err.message}`);
-                  } else {
-                    setTransferTxInspectError(err instanceof Error ? err.message : String(err));
-                  }
-                }
-              }}
-              className="px-4 py-2 bg-gold/20 hover:bg-gold/30 rounded-lg border border-gold/40 text-gold text-xs font-semibold transition-colors"
-            >
-              Decode &amp; Verify Transfer Tx
-            </button>
-          </div>
-
-          {transferTxInspectError && (
-            <div
-              data-testid="transfer-tx-decode-error"
-              className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3"
-            >
-              {transferTxInspectError}
-            </div>
-          )}
-
-          {inspectedTransferTx && (
-            <div data-testid="transfer-tx-decode-result" className="flex flex-col gap-2 text-xs">
-              <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1 text-muted">
-                <span>
-                  Signature:{" "}
-                  <strong
-                    data-testid="transfer-tx-sig-status"
-                    className={
-                      inspectedTransferTx.signatureValid ? "text-emerald-400" : "text-red-400"
-                    }
-                  >
-                    {inspectedTransferTx.signatureValid ? "VALID" : "INVALID"}
-                  </strong>
-                </span>
-                <span>
-                  Amount: <strong className="text-gold">{inspectedTransferTx.amount}</strong>
-                </span>
-                <span>
-                  Nonce: <strong className="text-fg">{inspectedTransferTx.nonce}</strong>
-                </span>
-                <span>
-                  Fee: <strong className="text-fg">{inspectedTransferTx.fee}</strong>
-                </span>
-                <span>
-                  Size: <strong className="text-fg">{inspectedTransferTx.wireSizeBytes}B</strong>
-                </span>
-              </div>
-              <pre
-                data-testid="transfer-tx-decode-json"
-                className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto max-h-72"
-              >
-                {JSON.stringify(inspectedTransferTx, null, 2)}
-              </pre>
-            </div>
-          )}
-        </div>
+        {transferSignedResult &&
+          renderSignedEnvelopeCard(transferSignedResult, transferBroadcastStatus, "transfer")}
       </div>
 
       {/* Universal Tx Auto-Decoder & Air-Gap Envelope Studio Panel */}
@@ -3808,12 +1714,2373 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
           </div>
         )}
       </div>
+      </div>
 
+      {/* Group 2: Contracts & Codegen */}
+      <div
+        id="wallet-tabpanel-contracts-codegen"
+        role="tabpanel"
+        data-testid="wallet-panel-group-contracts-codegen"
+        hidden={activeSubTab !== "contracts-codegen"}
+        className={activeSubTab === "contracts-codegen" ? "flex flex-col gap-6" : "hidden"}
+      >
+        {renderToolRail("contracts-codegen")}
+      {/* Wasmi Contract Call Builder + Batch Call Estimator + Code Exporter */}
+      <div
+        className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-5"
+        data-testid="wasmi-call-builder-panel"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
+          <div>
+            <h2 className="text-sm font-semibold text-fg">
+              Wasmi Contract Call Builder &amp; Batch Estimator
+            </h2>
+            <p className="text-xs text-muted">
+              Construct, fee-estimate, batch, export (cURL / TypeScript SDK / JSON presets), and sign canonical Wasmi contract calls
+            </p>
+          </div>
+          <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-surface-2 border border-border text-gold">
+            Wasmi Call + Codegen
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div>
+            <label className="block text-xs font-medium text-muted mb-1">
+              Wasmi Contract Action
+            </label>
+            <select
+              value={contractCallType}
+              onChange={(e) => setContractCallType(e.target.value as ContractCallType)}
+              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-medium text-fg focus:outline-none focus:border-gold"
+            >
+              <option value="token_transfer">Wasmi: Token Transfer (token_transfer)</option>
+              <option value="vault_create">Wasmi: Timelocked Vault (vault_create)</option>
+              <option value="name_register">Wasmi: Name Registry (name_register)</option>
+              <option value="htlc_create">Wasmi: Hash Time Locked Contract (htlc_create)</option>
+              <option value="nft_mint">Wasmi: NFT Mint (nft_mint)</option>
+              <option value="escrow_create">Wasmi: Escrow Create (escrow_create)</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-muted mb-1">
+              Account Nonce
+            </label>
+            <input
+              type="number"
+              value={nonceStr}
+              onChange={(e) => setNonceStr(e.target.value)}
+              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-muted mb-1">
+              Fee (atoms)
+            </label>
+            <input
+              type="text"
+              value={feeStr}
+              onChange={(e) => setFeeStr(e.target.value)}
+              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+            />
+          </div>
+        </div>
+
+        {/* Dynamic Action Parameters */}
+        <div className="bg-surface-2/60 p-4 rounded-lg border border-border/80 flex flex-col gap-3">
+          {contractCallType === "token_transfer" && (
+            <>
+              <div>
+                <label className="block text-xs font-medium text-muted mb-1">
+                  Token Contract Address (32-byte hex)
+                </label>
+                <input
+                  type="text"
+                  value={contractHex}
+                  onChange={(e) => setContractHex(e.target.value)}
+                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-muted mb-1">
+                  Token Units (u128)
+                </label>
+                <input
+                  type="text"
+                  value={tokenUnitsStr}
+                  onChange={(e) => setTokenUnitsStr(e.target.value)}
+                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                />
+              </div>
+            </>
+          )}
+
+          {contractCallType === "vault_create" && (
+            <>
+              <div>
+                <label className="block text-xs font-medium text-muted mb-1">
+                  Vault Contract Address (32-byte hex)
+                </label>
+                <input
+                  type="text"
+                  value={contractHex}
+                  onChange={(e) => setContractHex(e.target.value)}
+                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">
+                    Deposit Amount (KVNC)
+                  </label>
+                  <input
+                    type="text"
+                    value={vaultAmountKvncStr}
+                    onChange={(e) => setVaultAmountKvncStr(e.target.value)}
+                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">
+                    Lock Until (ms timestamp)
+                  </label>
+                  <input
+                    type="text"
+                    value={lockUntilMsStr}
+                    onChange={(e) => setLockUntilMsStr(e.target.value)}
+                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                  />
+                </div>
+              </div>
+            </>
+          )}
+
+          {contractCallType === "name_register" && (
+            <>
+              <div>
+                <label className="block text-xs font-medium text-muted mb-1">
+                  Name Registry Contract Address (32-byte hex)
+                </label>
+                <input
+                  type="text"
+                  value={contractHex}
+                  onChange={(e) => setContractHex(e.target.value)}
+                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                />
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">
+                    Registered Name
+                  </label>
+                  <input
+                    type="text"
+                    value={nameStr}
+                    onChange={(e) => setNameStr(e.target.value)}
+                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">
+                    Registered Public Key (32-byte hex)
+                  </label>
+                  <input
+                    type="text"
+                    value={namePubkeyHex}
+                    onChange={(e) => setNamePubkeyHex(e.target.value)}
+                    placeholder={accounts[1]?.publicKeyHex || "Defaults to Account #1"}
+                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-muted mb-1">
+                  Relay Endpoints (one URL per line)
+                </label>
+                <textarea
+                  rows={2}
+                  value={relayEndpointsStr}
+                  onChange={(e) => setRelayEndpointsStr(e.target.value)}
+                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                />
+              </div>
+            </>
+          )}
+
+          {contractCallType === "htlc_create" && (
+            <>
+              <div>
+                <label className="block text-xs font-medium text-muted mb-1">
+                  HTLC Contract Address (32-byte hex)
+                </label>
+                <input
+                  type="text"
+                  value={contractHex}
+                  onChange={(e) => setContractHex(e.target.value)}
+                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-muted mb-1">
+                  Hash Lock (32-byte hex)
+                </label>
+                <input
+                  type="text"
+                  value={hashlockHex}
+                  onChange={(e) => setHashlockHex(e.target.value)}
+                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                />
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">
+                    Timelock Expiry (u64 timestamp/height)
+                  </label>
+                  <input
+                    type="text"
+                    value={timelockStr}
+                    onChange={(e) => setTimelockStr(e.target.value)}
+                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">
+                    Recipient Public Key (32-byte hex)
+                  </label>
+                  <input
+                    type="text"
+                    value={htlcRecipientHex}
+                    onChange={(e) => setHtlcRecipientHex(e.target.value)}
+                    placeholder={accounts[1]?.publicKeyHex || "Defaults to Account #1"}
+                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                  />
+                </div>
+              </div>
+            </>
+          )}
+
+          {contractCallType === "nft_mint" && (
+            <>
+              <div>
+                <label className="block text-xs font-medium text-muted mb-1">
+                  NFT Contract Address (32-byte hex)
+                </label>
+                <input
+                  type="text"
+                  value={contractHex}
+                  onChange={(e) => setContractHex(e.target.value)}
+                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                />
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">
+                    Collection Public Key (32-byte hex)
+                  </label>
+                  <input
+                    type="text"
+                    value={collectionHex}
+                    onChange={(e) => setCollectionHex(e.target.value)}
+                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">
+                    Recipient / To Public Key (32-byte hex)
+                  </label>
+                  <input
+                    type="text"
+                    value={nftToHex}
+                    onChange={(e) => setNftToHex(e.target.value)}
+                    placeholder={accounts[1]?.publicKeyHex || "Defaults to Account #1"}
+                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">
+                    Token ID (u128)
+                  </label>
+                  <input
+                    type="text"
+                    value={tokenIdStr}
+                    onChange={(e) => setTokenIdStr(e.target.value)}
+                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                  />
+                </div>
+                <div className="md:col-span-2">
+                  <label className="block text-xs font-medium text-muted mb-1">
+                    Token URI
+                  </label>
+                  <input
+                    type="text"
+                    value={tokenUriStr}
+                    onChange={(e) => setTokenUriStr(e.target.value)}
+                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                  />
+                </div>
+              </div>
+            </>
+          )}
+
+          {contractCallType === "escrow_create" && (
+            <>
+              <div>
+                <label className="block text-xs font-medium text-muted mb-1">
+                  Escrow Contract Address (32-byte hex)
+                </label>
+                <input
+                  type="text"
+                  value={contractHex}
+                  onChange={(e) => setContractHex(e.target.value)}
+                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-muted mb-1">
+                  Parties Public Keys (32-byte hexes, one per line or comma-separated)
+                </label>
+                <textarea
+                  rows={2}
+                  value={escrowPartiesStr}
+                  onChange={(e) => setEscrowPartiesStr(e.target.value)}
+                  placeholder={
+                    accounts.length >= 2
+                      ? `${accounts[0].publicKeyHex}\n${accounts[1].publicKeyHex}`
+                      : "Defaults to Account #0 and #1"
+                  }
+                  className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                />
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">
+                    Threshold (u8)
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={255}
+                    value={escrowThresholdStr}
+                    onChange={(e) => setEscrowThresholdStr(e.target.value)}
+                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">
+                    Amount (atoms)
+                  </label>
+                  <input
+                    type="text"
+                    value={escrowAmountStr}
+                    onChange={(e) => setEscrowAmountStr(e.target.value)}
+                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">
+                    Deadline (u64 timestamp)
+                  </label>
+                  <input
+                    type="text"
+                    value={escrowDeadlineStr}
+                    onChange={(e) => setEscrowDeadlineStr(e.target.value)}
+                    className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg"
+                  />
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={() => handleSign(contractCallType)}
+            disabled={!isMnemonicValid}
+            className="px-5 py-2.5 bg-gold hover:bg-gold/90 text-bg font-semibold rounded-lg text-sm transition-colors disabled:opacity-50"
+          >
+            Sign & Bincode Serialize
+          </button>
+              <button
+                type="button"
+                data-testid="estimate-call-btn"
+                onClick={handleEstimateCall}
+                disabled={!isMnemonicValid || isEstimating}
+                className="px-4 py-2.5 bg-surface-2 hover:bg-border text-fg font-medium rounded-lg text-xs border border-border transition-colors disabled:opacity-50"
+              >
+                {isEstimating ? "Estimating..." : "Estimate Fee & Nonce (SDK)"}
+              </button>
+
+              <button
+                type="button"
+                data-testid="queue-batch-call-btn"
+                onClick={handleQueueToBatch}
+                disabled={!isMnemonicValid}
+                className="px-3.5 py-2.5 bg-surface-2 hover:bg-border text-fg font-medium rounded-lg text-xs border border-border transition-colors disabled:opacity-50"
+              >
+                Queue to Batch ({batchQueue.length})
+              </button>
+
+              <button
+                type="button"
+                data-testid="estimate-batch-btn"
+                onClick={handleEstimateBatch}
+                disabled={!isMnemonicValid || isEstimatingBatch}
+                className="px-3.5 py-2.5 bg-gold/20 hover:bg-gold/30 text-gold font-semibold rounded-lg text-xs border border-gold/40 transition-colors disabled:opacity-50"
+              >
+                {isEstimatingBatch ? "Estimating Batch..." : "Estimate Batch"}
+              </button>
+
+              {batchQueue.length > 0 && (
+                <button
+                  type="button"
+                  data-testid="clear-batch-btn"
+                  onClick={handleClearBatch}
+                  className="px-3 py-2.5 bg-surface-2 hover:bg-border text-muted hover:text-fg font-medium rounded-lg text-xs border border-border transition-colors"
+                >
+                  Clear Batch
+                </button>
+              )}
+
+              <button
+                type="button"
+                data-testid="copy-curl-snippet-btn"
+                onClick={handleExportCurlSnippet}
+                disabled={!isMnemonicValid}
+                className="px-3.5 py-2.5 bg-surface-2 hover:bg-border text-fg font-medium rounded-lg text-xs border border-border transition-colors disabled:opacity-50"
+              >
+                {copySuccess === "curl-snippet" ? "Copied cURL!" : "Copy JSON-RPC cURL"}
+              </button>
+
+              <button
+                type="button"
+                data-testid="copy-sdk-snippet-btn"
+                onClick={handleExportSdkSnippet}
+                disabled={!isMnemonicValid}
+                className="px-3.5 py-2.5 bg-surface-2 hover:bg-border text-fg font-medium rounded-lg text-xs border border-border transition-colors disabled:opacity-50"
+              >
+                {copySuccess === "sdk-snippet" ? "Copied SDK!" : "Copy SDK Snippet"}
+              </button>
+
+              <button
+                type="button"
+                data-testid="export-batch-presets-btn"
+                onClick={handleExportBatchPresets}
+                disabled={!isMnemonicValid}
+                className="px-3.5 py-2.5 bg-surface-2 hover:bg-border text-fg font-medium rounded-lg text-xs border border-border transition-colors disabled:opacity-50"
+              >
+                {copySuccess === "batch-presets" ? "Exported JSON!" : "Export Batch Presets JSON"}
+              </button>
+
+              <button
+                type="button"
+                data-testid="toggle-import-presets-btn"
+                onClick={() => {
+                  setShowPresetsPanel((prev) => !prev);
+                  setPresetsErrorMsg(null);
+                }}
+                className="px-3.5 py-2.5 bg-surface-2 hover:bg-border text-fg font-medium rounded-lg text-xs border border-border transition-colors"
+              >
+                Import Presets JSON
+              </button>
+        </div>
+        {showPresetsPanel && (
+          <div
+            data-testid="presets-json-panel"
+            className="bg-surface-2 border border-border rounded-lg p-3.5 flex flex-col gap-2.5 text-xs"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-semibold text-fg">
+                Batch Call Presets JSON (Export / Import)
+              </span>
+              <div className="flex items-center gap-3">
+                {presetsJsonInput.trim().length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => copyToClipboard(presetsJsonInput, "batch-presets")}
+                    className="text-gold hover:underline font-medium"
+                  >
+                    Copy JSON
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setShowPresetsPanel(false)}
+                  className="text-muted hover:text-fg"
+                >
+                  Hide
+                </button>
+              </div>
+            </div>
+            <textarea
+              data-testid="presets-json-input"
+              rows={5}
+              value={presetsJsonInput}
+              onChange={(e) => setPresetsJsonInput(e.target.value)}
+              placeholder='{"version": 1, "presets": [{"contractHex": "...", "method": "...", "argsHex": "...", "value": "0", "gasLimit": "100000"}]}'
+              className="w-full bg-surface border border-border/60 rounded p-2.5 font-mono text-[11px] text-fg focus:outline-none focus:border-gold"
+            />
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                data-testid="import-presets-apply-btn"
+                onClick={handleImportBatchPresets}
+                className="px-3.5 py-1.5 bg-gold/20 hover:bg-gold/30 text-gold font-semibold rounded border border-gold/40 transition-colors"
+              >
+                Load Presets into Batch
+              </button>
+            </div>
+            {presetsStatusMsg && (
+              <div
+                data-testid="presets-status-msg"
+                className="text-xs font-mono text-emerald-400"
+              >
+                {presetsStatusMsg}
+              </div>
+            )}
+            {presetsErrorMsg && (
+              <div
+                data-testid="presets-error-msg"
+                className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded p-2"
+              >
+                {presetsErrorMsg}
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeCodeSnippet && (
+          <div
+            data-testid="code-exporter-preview"
+            className="bg-surface-2 border border-border rounded-lg p-3 flex flex-col gap-2 text-xs"
+          >
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-fg">
+                {activeCodeSnippet.kind === "curl"
+                  ? "JSON-RPC cURL Command (kovanica_call)"
+                  : "TypeScript kovanica-sdk Snippet (estimateAndBuildCall + dryRunCall)"}
+              </span>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() =>
+                    copyToClipboard(
+                      activeCodeSnippet.code,
+                      activeCodeSnippet.kind === "curl" ? "curl-snippet" : "sdk-snippet",
+                    )
+                  }
+                  className="text-gold hover:underline font-medium"
+                >
+                  Copy
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveCodeSnippet(null)}
+                  className="text-muted hover:text-fg"
+                >
+                  Hide
+                </button>
+              </div>
+            </div>
+            <pre
+              data-testid="code-exporter-snippet"
+              className="bg-surface border border-border/60 rounded p-2.5 font-mono text-[11px] text-emerald-400 overflow-x-auto"
+            >
+              {activeCodeSnippet.code}
+            </pre>
+          </div>
+        )}
+
+        {(batchQueue.length > 0 || batchEstimateResult) && (
+          <div
+            data-testid="batch-estimator-panel"
+            className="bg-surface-2/80 border border-gold/30 rounded-lg p-3.5 flex flex-col gap-2.5 text-xs"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 pb-2">
+              <span className="font-semibold text-fg">
+                Multi-Call Batch Estimator ({batchEstimateResult ? batchEstimateResult.calls.length : batchQueue.length} Call{(batchEstimateResult ? batchEstimateResult.calls.length : batchQueue.length) === 1 ? "" : "s"})
+              </span>
+              {batchEstimateResult && (
+                <div
+                  data-testid="batch-estimate-totals"
+                  className="font-mono flex flex-wrap gap-x-4 gap-y-1 text-muted"
+                >
+                  <span>
+                    Total Size: <strong className="text-fg">{batchEstimateResult.totalEstimatedTxSize}B</strong>
+                  </span>
+                  <span>
+                    Rate: <strong className="text-fg">{batchEstimateResult.feeRatePerByte.toString()} atoms/B</strong>
+                  </span>
+                  <span>
+                    Total Fee (+20%): <strong className="text-gold">{batchEstimateResult.totalFee.toString()} atoms</strong>
+                  </span>
+                  <span>
+                    Total Gas: <strong className="text-fg">{batchEstimateResult.totalGasLimit.toString()}</strong>
+                  </span>
+                  {batchEstimateResult.startNonce !== undefined && (
+                    <span>
+                      Start Nonce: <strong className="text-fg">{batchEstimateResult.startNonce.toString()}</strong>
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {batchEstimateResult ? (
+              <div className="flex flex-col gap-1.5 font-mono text-[11px]">
+                {batchEstimateResult.calls.map((item: PreparedCallTransaction, idx: number) => (
+                  <div
+                    key={idx}
+                    data-testid={`batch-call-row-${idx}`}
+                    className="bg-surface border border-border/60 rounded px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2"
+                  >
+                    <span className="text-fg font-semibold">
+                      #{idx + 1} {item.call.method}
+                    </span>
+                    <div className="flex flex-wrap gap-x-4 text-muted">
+                      <span>
+                        Nonce: <strong className="text-fg">{item.nonce !== undefined ? item.nonce.toString() : "—"}</strong>
+                      </span>
+                      <span>
+                        Wire Size: <strong className="text-fg">{item.estimatedTxSize}B</strong>
+                      </span>
+                      <span>
+                        Fee: <strong className="text-gold">{item.fee.toString()} atoms</strong>
+                      </span>
+                      <span>
+                        Gas: <strong className="text-fg">{item.gasLimit.toString()}</strong>
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="flex flex-wrap gap-2 font-mono text-[11px] text-muted">
+                {batchQueue.map((queued, idx) => (
+                  <span
+                    key={idx}
+                    className="bg-surface border border-border/60 rounded px-2 py-1 text-fg"
+                  >
+                    #{idx + 1} {queued.method} ({bytesToHex(queued.args).slice(0, 12)}...)
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {preparedEstimate && (
+          <div
+            data-testid="prepared-estimate-summary"
+            className="bg-surface-2/80 border border-gold/30 rounded-lg p-3 text-xs font-mono flex flex-wrap gap-x-5 gap-y-1 text-muted"
+          >
+            <span>
+              Size: <strong className="text-fg">{preparedEstimate.estimatedTxSize}B</strong>
+            </span>
+            {preparedEstimate.feeRatePerByte !== undefined && (
+              <span>
+                Rate: <strong className="text-fg">{preparedEstimate.feeRatePerByte.toString()} atoms/B</strong>
+              </span>
+            )}
+            <span>
+              Fee (+20%): <strong className="text-gold">{preparedEstimate.fee.toString()} atoms</strong>
+            </span>
+            <span>
+              Gas Limit: <strong className="text-fg">{preparedEstimate.gasLimit.toString()}</strong>
+            </span>
+            {preparedEstimate.nonce !== undefined && (
+              <span>
+                Nonce: <strong className="text-fg">{preparedEstimate.nonce.toString()}</strong>
+              </span>
+            )}
+          </div>
+        )}
+        {contractErrorMsg && (
+          <div className="text-xs text-red-400 bg-red-950/40 p-3 rounded border border-red-800">
+            {contractErrorMsg}
+          </div>
+        )}
+
+        {contractSignedResult &&
+          renderSignedEnvelopeCard(contractSignedResult, contractBroadcastStatus, "contract")}
+      </div>
+
+      {/* Typed Contract Facades Studio */}
+      <div
+        className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-4"
+        data-testid="typed-facades-studio-panel"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
+          <div>
+            <h2 className="text-sm font-semibold text-fg">
+              Typed Contract Facades Studio (7 Canonical Clients)
+            </h2>
+            <p className="text-xs text-muted">
+              Invoke <code className="font-mono text-fg">runTypedFacadeRead</code> across NameRegistry, Token, NFT, Escrow, HTLC, Vault, and Multisig SDK clients
+            </p>
+          </div>
+          <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-surface-2 border border-border text-gold">
+            7 SDK Facades
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+          <div>
+            <label
+              htmlFor="facade-kind-select"
+              className="block text-xs font-medium text-muted mb-1"
+            >
+              Contract Facade
+            </label>
+            <select
+              id="facade-kind-select"
+              data-testid="facade-kind-select"
+              value={facadeKind}
+              onChange={(e) => {
+                setFacadeKind(e.target.value as TypedFacadeKind);
+                setFacadeReadResult(null);
+                setFacadeReadError(null);
+              }}
+              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+            >
+              <option value="name">name — NameRegistryClient.getRecord</option>
+              <option value="token">token — TokenClient.getMetadata</option>
+              <option value="nft">nft — NftClient.getMetadata</option>
+              <option value="escrow">escrow — EscrowClient.getEscrow</option>
+              <option value="htlc">htlc — HtlcClient.getHtlc</option>
+              <option value="vault">vault — VaultClient.getVault</option>
+              <option value="multisig">multisig — MultisigClient.getState</option>
+            </select>
+          </div>
+
+          <div>
+            <label
+              htmlFor="facade-contract-input"
+              className="block text-xs font-medium text-muted mb-1"
+            >
+              Contract Address (PRO-21 or 32-byte hex)
+            </label>
+            <input
+              id="facade-contract-input"
+              data-testid="facade-contract-input"
+              type="text"
+              value={facadeContractInput}
+              onChange={(e) => setFacadeContractInput(e.target.value)}
+              placeholder="0x... or kvnc..."
+              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+            />
+          </div>
+
+          <div>
+            <label
+              htmlFor="facade-key-input"
+              className="block text-xs font-medium text-muted mb-1"
+            >
+              Record Key{" "}
+              {facadeKind === "token" || facadeKind === "nft" || facadeKind === "multisig"
+                ? "(singleton — not required)"
+                : facadeKind === "name"
+                  ? "(name string)"
+                  : "(32-byte ID hex)"}
+            </label>
+            <input
+              id="facade-key-input"
+              data-testid="facade-key-input"
+              type="text"
+              value={facadeKeyInput}
+              onChange={(e) => setFacadeKeyInput(e.target.value)}
+              disabled={
+                facadeKind === "token" || facadeKind === "nft" || facadeKind === "multisig"
+              }
+              placeholder={
+                facadeKind === "name"
+                  ? "alice"
+                  : facadeKind === "token" || facadeKind === "nft" || facadeKind === "multisig"
+                    ? "Singleton state"
+                    : "0x... (64 hex chars)"
+              }
+              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold disabled:opacity-50"
+            />
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            data-testid="run-facade-read-btn"
+            disabled={isReadingFacade}
+            onClick={async () => {
+              setFacadeReadError(null);
+              setFacadeReadResult(null);
+              setIsReadingFacade(true);
+              try {
+                const res = await runTypedFacadeRead(client, {
+                  facade: facadeKind,
+                  contract: facadeContractInput,
+                  key:
+                    facadeKind === "token" ||
+                    facadeKind === "nft" ||
+                    facadeKind === "multisig"
+                      ? undefined
+                      : facadeKeyInput,
+                });
+                setFacadeReadResult(res);
+              } catch (err: unknown) {
+                if (err instanceof KovanicaDecodeError) {
+                  setFacadeReadError(`[${err.code}] ${err.message}`);
+                } else {
+                  setFacadeReadError(err instanceof Error ? err.message : String(err));
+                }
+              } finally {
+                setIsReadingFacade(false);
+              }
+            }}
+            className="px-4 py-2 bg-gold hover:bg-gold/90 text-bg rounded-lg text-xs font-semibold transition-colors disabled:opacity-50"
+          >
+            {isReadingFacade ? "Reading Facade..." : "Run Typed Facade Read"}
+          </button>
+        </div>
+
+        {facadeReadError && (
+          <div
+            data-testid="facade-read-error"
+            className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3"
+          >
+            {facadeReadError}
+          </div>
+        )}
+
+        {facadeReadResult && (
+          <div
+            data-testid="facade-read-result"
+            className="flex flex-col gap-2 text-xs"
+          >
+            <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1 text-muted">
+              <span>
+                Method: <strong className="text-gold">{facadeReadResult.method}</strong>
+              </span>
+              <span>
+                Status:{" "}
+                <strong
+                  className={
+                    facadeReadResult.found ? "text-emerald-400" : "text-amber-300"
+                  }
+                >
+                  {facadeReadResult.found ? "found" : "empty (null)"}
+                </strong>
+              </span>
+            </div>
+            <pre
+              data-testid="facade-read-json"
+              className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto"
+            >
+              {JSON.stringify(
+                facadeReadResult.record,
+                (_key, value) =>
+                  typeof value === "bigint" ? value.toString() : value,
+                2,
+              )}
+            </pre>
+          </div>
+        )}
+      </div>
+      </div>
+
+      {/* Group 3: Storage & Logs */}
+      <div
+        id="wallet-tabpanel-storage-logs"
+        role="tabpanel"
+        data-testid="wallet-panel-group-storage-logs"
+        hidden={activeSubTab !== "storage-logs"}
+        className={activeSubTab === "storage-logs" ? "flex flex-col gap-6" : "hidden"}
+      >
+        {renderToolRail("storage-logs")}
       {/* Storage Slot Deriver Studio */}
       <StorageSlotStudioPanel client={client} />
 
+      {/* SDK v0.4.0 Contract State Bincode Decoder & Live Storage Slot Fetch */}
+      <div className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-4" data-testid="bincode-decoder-panel">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
+          <div>
+            <h2 className="text-sm font-semibold text-fg">
+              Contract State Bincode Decoder (SDK v0.4.0)
+            </h2>
+            <p className="text-xs text-muted">
+              Live Storage Slot Fetch (<code className="font-mono text-fg">kovanica_getStorageAt</code>), canonical BLAKE3 slot derivation, and typed Bincode 1.x decoding
+            </p>
+          </div>
+          <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-surface-2 border border-border text-gold">
+            kovanica_getStorageAt
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label htmlFor="storage-contract-address" className="block text-xs font-medium text-muted mb-1">
+              Contract Address (PRO-21 <code className="font-mono">kvnc...dag</code> / <code className="font-mono">tknc...dag</code> or 32-byte hex)
+            </label>
+            <input
+              id="storage-contract-address"
+              data-testid="storage-contract-address"
+              type="text"
+              value={storageContractAddr}
+              onChange={(e) => setStorageContractAddr(e.target.value)}
+              placeholder="kvnc...dag or 0x..."
+              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+            />
+          </div>
+
+          <div>
+            <label htmlFor="decoder-kind-select" className="block text-xs font-medium text-muted mb-1">
+              Contract Record Type & Typed Decoder
+            </label>
+            <select
+              id="decoder-kind-select"
+              data-testid="decoder-kind-select"
+              value={decoderKind}
+              onChange={(e) => setDecoderKind(e.target.value as ContractDecoderKind)}
+              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+            >
+              <option value="name">NameRecord — decodeNameRecord (kvnc/v1/name/)</option>
+              <option value="htlc">HtlcRecord — decodeHtlcRecord (kvnc/v1/htlc/)</option>
+              <option value="escrow">EscrowRecord — decodeEscrowRecord (kvnc/v1/escrow/)</option>
+              <option value="vault">VaultRecord — decodeVaultRecord (kvnc/v1/vault/)</option>
+              <option value="token_metadata">TokenMetadata — decodeTokenMetadata (kvnc/v1/state)</option>
+              <option value="nft_metadata">NftMetadata — decodeNftMetadata (kvnc/v1/state)</option>
+              <option value="multisig">MultisigState — decodeMultisigState (kvnc/v1/state)</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div>
+            <label htmlFor="decoder-custom-prefix" className="block text-xs font-medium text-muted mb-1">
+              Custom Storage Prefix (optional override)
+            </label>
+            <input
+              id="decoder-custom-prefix"
+              data-testid="decoder-custom-prefix"
+              type="text"
+              value={customSlotPrefix}
+              onChange={(e) => setCustomSlotPrefix(e.target.value)}
+              placeholder="e.g. kvnc/v1/name/ (defaults to record prefix)"
+              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+            />
+          </div>
+
+          <div className="md:col-span-2 flex flex-wrap items-end gap-2">
+            <div className="flex-1 min-w-[180px]">
+              <label htmlFor="decoder-slot-key" className="block text-xs font-medium text-muted mb-1">
+                Storage Slot Key (name / 32-byte hex ID; ignored for singleton <code className="font-mono">kvnc/v1/state</code> unless custom prefix set)
+              </label>
+              <input
+                id="decoder-slot-key"
+                data-testid="decoder-slot-key"
+                type="text"
+                value={slotKeyInput}
+                onChange={(e) => setSlotKeyInput(e.target.value)}
+                placeholder="alice or 64-char hex ID"
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+            <button
+              type="button"
+              data-testid="derive-slot-btn"
+              onClick={handleDeriveSlot}
+              className="px-3 py-2 bg-surface-2 hover:bg-border border border-border rounded-lg text-xs text-fg font-medium whitespace-nowrap transition-colors"
+            >
+              Derive Slot
+            </button>
+            <button
+              type="button"
+              data-testid="fetch-storage-slot-btn"
+              onClick={handleFetchAndDecodeStorage}
+              disabled={isFetchingStorage}
+              className="px-3.5 py-2 bg-gold hover:bg-gold/90 text-bg rounded-lg text-xs font-semibold whitespace-nowrap transition-colors disabled:opacity-50"
+            >
+              {isFetchingStorage ? "Fetching Storage..." : "Live Fetch & Decode (kovanica_getStorageAt)"}
+            </button>
+          </div>
+        </div>
+
+        {derivedSlotHex && (
+          <div
+            data-testid="derived-slot-hex"
+            className="bg-surface-2/80 border border-border rounded-lg px-3 py-2 text-xs font-mono text-emerald-400 break-all"
+          >
+            Derived BLAKE3 Slot (32B): 0x{derivedSlotHex}
+          </div>
+        )}
+
+        <div>
+          <label htmlFor="decoder-hex-input" className="block text-xs font-medium text-muted mb-1">
+            Raw Storage Value (Hex)
+          </label>
+          <textarea
+            id="decoder-hex-input"
+            data-testid="decoder-hex-input"
+            rows={2}
+            value={decoderHexInput}
+            onChange={(e) => setDecoderHexInput(e.target.value)}
+            placeholder="0x..."
+            className="w-full bg-surface-2 border border-border rounded-lg p-2.5 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+          />
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            data-testid="decode-bincode-btn"
+            onClick={handleDecodeState}
+            className="px-4 py-2 bg-gold/20 hover:bg-gold/30 rounded-lg border border-gold/40 text-gold text-xs font-semibold transition-colors"
+          >
+            Decode Bincode State
+          </button>
+        </div>
+
+        {storageEmptyMsg && (
+          <div
+            data-testid="storage-empty-msg"
+            className="text-xs font-mono text-amber-300 bg-amber-950/30 border border-amber-800/50 rounded-lg p-3"
+          >
+            {storageEmptyMsg}
+          </div>
+        )}
+
+        {decoderError && (
+          <div
+            data-testid="decoder-error-msg"
+            className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3"
+          >
+            {decoderError}
+          </div>
+        )}
+
+        {decodedOutput && (
+          <pre
+            data-testid="decoded-json-output"
+            className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto"
+          >
+            {decodedOutput}
+          </pre>
+        )}
+      </div>
+
       {/* Paginated Contract Logs Explorer (SDK v0.7.0) */}
       <PaginatedContractLogsPanel client={client} />
+
+      {/* Contract Log History & Failover RPC Panel */}
+      <div
+        className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-5"
+        data-testid="log-history-panel"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
+          <div>
+            <h2 className="text-sm font-semibold text-fg">
+              Contract Log History Explorer
+            </h2>
+            <p className="text-xs text-muted">
+              Query chunked <code className="font-mono text-fg">kovanica_getLogs</code> history with optional Bincode decoding
+            </p>
+          </div>
+          <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-surface-2 border border-border text-gold">
+            kovanica_getLogs
+          </span>
+        </div>
+
+        {/* Chunked Contract Log History Explorer */}
+        <div className="flex flex-col gap-3">
+          <h3 className="text-xs font-semibold text-muted uppercase tracking-wider">
+            Contract Log History Explorer
+          </h3>
+          <div className="grid grid-cols-1 md:grid-cols-5 gap-3 items-end">
+            <div>
+              <label
+                htmlFor="log-from-block-input"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                From Block
+              </label>
+              <input
+                id="log-from-block-input"
+                data-testid="log-from-block-input"
+                type="text"
+                value={logFromBlockStr}
+                onChange={(e) => setLogFromBlockStr(e.target.value)}
+                placeholder="0"
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="log-to-block-input"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                To Block
+              </label>
+              <input
+                id="log-to-block-input"
+                data-testid="log-to-block-input"
+                type="text"
+                value={logToBlockStr}
+                onChange={(e) => setLogToBlockStr(e.target.value)}
+                placeholder="1000"
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="log-chunk-size-input"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                Chunk Size
+              </label>
+              <input
+                id="log-chunk-size-input"
+                data-testid="log-chunk-size-input"
+                type="number"
+                min={1}
+                value={logChunkSizeStr}
+                onChange={(e) => setLogChunkSizeStr(e.target.value)}
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="log-address-input"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                Contract Address (optional)
+              </label>
+              <input
+                id="log-address-input"
+                data-testid="log-address-input"
+                type="text"
+                value={logAddressInput}
+                onChange={(e) => setLogAddressInput(e.target.value)}
+                placeholder="0x... or kvnc..."
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="log-decoder-select"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                Bincode Decoder (optional)
+              </label>
+              <select
+                id="log-decoder-select"
+                data-testid="log-decoder-select"
+                value={logDecoderKind}
+                onChange={(e) => setLogDecoderKind(e.target.value as ContractLogKind | "")}
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              >
+                <option value="">Raw logs only</option>
+                <option value="name">name</option>
+                <option value="htlc">htlc</option>
+                <option value="escrow">escrow</option>
+                <option value="vault">vault</option>
+                <option value="token_metadata">token_metadata</option>
+                <option value="token_pool">token_pool</option>
+                <option value="nft_metadata">nft_metadata</option>
+                <option value="multisig_state">multisig_state</option>
+                <option value="multisig_tx">multisig_tx</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              data-testid="run-log-history-btn"
+              disabled={isQueryingLogs}
+              onClick={async () => {
+                setLogHistoryError(null);
+                setLogHistoryResult(null);
+                setIsQueryingLogs(true);
+                try {
+                  const parsedChunk = Number.parseInt(logChunkSizeStr.trim(), 10);
+                  const res = await runContractLogHistoryQuery(client, {
+                    fromBlock: logFromBlockStr,
+                    toBlock: logToBlockStr,
+                    address: logAddressInput.trim() || undefined,
+                    decoderKind: logDecoderKind || undefined,
+                    chunkSize: Number.isFinite(parsedChunk) ? parsedChunk : undefined,
+                  });
+                  setLogHistoryResult(res);
+                } catch (err: unknown) {
+                  if (err instanceof KovanicaDecodeError) {
+                    setLogHistoryError(`[${err.code}] ${err.message}`);
+                  } else {
+                    setLogHistoryError(err instanceof Error ? err.message : String(err));
+                  }
+                } finally {
+                  setIsQueryingLogs(false);
+                }
+              }}
+              className="px-4 py-2 bg-gold hover:bg-gold/90 text-bg rounded-lg text-xs font-semibold transition-colors disabled:opacity-50"
+            >
+              {isQueryingLogs ? "Querying Logs..." : "Query Log History"}
+            </button>
+          </div>
+
+          {logHistoryError && (
+            <div
+              data-testid="log-history-error"
+              className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3"
+            >
+              {logHistoryError}
+            </div>
+          )}
+
+          {logHistoryResult && (
+            <div data-testid="log-history-result" className="flex flex-col gap-2 text-xs">
+              <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1 text-muted">
+                <span>
+                  Range: <strong className="text-fg">{logHistoryResult.fromBlock}..{logHistoryResult.toBlock}</strong>
+                </span>
+                <span>
+                  Chunks: <strong className="text-gold">{logHistoryResult.chunksQueried}</strong>
+                </span>
+                <span>
+                  Logs: <strong className="text-fg">{logHistoryResult.totalLogs}</strong>
+                </span>
+                <span>
+                  Decoded: <strong className="text-emerald-400">{logHistoryResult.decodedCount}</strong>
+                </span>
+              </div>
+              <pre
+                data-testid="log-history-json"
+                className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto max-h-72"
+              >
+                {JSON.stringify(logHistoryResult, null, 2)}
+              </pre>
+            </div>
+          )}
+        </div>
+      </div>
+      </div>
+
+      {/* Group 4: Verification & Diagnostics */}
+      <div
+        id="wallet-tabpanel-verify-diagnostics"
+        role="tabpanel"
+        data-testid="wallet-panel-group-verify-diagnostics"
+        hidden={activeSubTab !== "verify-diagnostics"}
+        className={activeSubTab === "verify-diagnostics" ? "flex flex-col gap-6" : "hidden"}
+      >
+        {renderToolRail("verify-diagnostics")}
+      {/* Raw Wire Tx Decoder & Node Capability Probe Panel */}
+      <div
+        className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-5"
+        data-testid="raw-tx-and-probe-panel"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
+          <div>
+            <h2 className="text-sm font-semibold text-fg">
+              Raw Wire Tx Decoder &amp; Node Capability Probe
+            </h2>
+            <p className="text-xs text-muted">
+              Decode signed Call transactions offline with RFC 8032 Ed25519 verification and probe any RPC endpoint for network-tag headers, batch support, and latency
+            </p>
+          </div>
+          <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-surface-2 border border-border text-gold">
+            Offline Decode + RPC Probe
+          </span>
+        </div>
+
+        {/* Offline Raw Wire Tx Decoder */}
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-xs font-semibold text-muted uppercase tracking-wider">
+              Offline Raw Wire Tx Decoder
+            </h3>
+            {signedResult?.rawTxHex && (
+              <button
+                type="button"
+                data-testid="load-signed-raw-tx-btn"
+                onClick={() => {
+                  setRawTxHexInput(signedResult.rawTxHex);
+                  setRawTxChainIdStr(String(selectedChainId));
+                  setRawTxInspectError(null);
+                }}
+                className="px-2.5 py-1 text-xs bg-surface-2 hover:bg-border rounded border border-border text-muted hover:text-fg transition-colors"
+              >
+                Load Last Signed Tx
+              </button>
+            )}
+          </div>
+
+          <textarea
+            id="raw-tx-hex-input"
+            data-testid="raw-tx-hex-input"
+            rows={3}
+            value={rawTxHexInput}
+            onChange={(e) => setRawTxHexInput(e.target.value)}
+            placeholder="Paste raw signed Call transaction hex (0x... or bare hex)..."
+            className="w-full bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+          />
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+            <div>
+              <label
+                htmlFor="raw-tx-chain-id-input"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                Chain ID (for sighash)
+              </label>
+              <input
+                id="raw-tx-chain-id-input"
+                data-testid="raw-tx-chain-id-input"
+                type="number"
+                min={0}
+                value={rawTxChainIdStr}
+                onChange={(e) => setRawTxChainIdStr(e.target.value)}
+                placeholder={String(selectedChainId)}
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+
+            <div className="md:col-span-2">
+              <label
+                htmlFor="raw-tx-pubkey-input"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                Signer Public Key Hex Override (optional, defaults to tx sender)
+              </label>
+              <input
+                id="raw-tx-pubkey-input"
+                data-testid="raw-tx-pubkey-input"
+                type="text"
+                value={rawTxPubkeyHex}
+                onChange={(e) => setRawTxPubkeyHex(e.target.value)}
+                placeholder="64-char hex pubkey (optional)"
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              data-testid="decode-raw-tx-btn"
+              onClick={() => {
+                setRawTxInspectError(null);
+                setInspectedRawTx(null);
+                try {
+                  const trimmedChain = rawTxChainIdStr.trim();
+                  const parsedChainId =
+                    trimmedChain.length > 0 ? BigInt(trimmedChain) : BigInt(selectedChainId);
+                  const inspected = inspectRawSignedCallTx(rawTxHexInput, {
+                    chainId: parsedChainId,
+                    publicKeyHex: rawTxPubkeyHex.trim() || undefined,
+                  });
+                  setInspectedRawTx(inspected);
+                } catch (err: unknown) {
+                  if (err instanceof KovanicaDecodeError) {
+                    setRawTxInspectError(`[${err.code}] ${err.message}`);
+                  } else {
+                    setRawTxInspectError(err instanceof Error ? err.message : String(err));
+                  }
+                }
+              }}
+              className="px-4 py-2 bg-gold hover:bg-gold/90 text-bg rounded-lg text-xs font-semibold transition-colors"
+            >
+              Decode &amp; Verify Tx
+            </button>
+          </div>
+
+          {rawTxInspectError && (
+            <div
+              data-testid="raw-tx-decode-error"
+              className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3"
+            >
+              {rawTxInspectError}
+            </div>
+          )}
+
+          {inspectedRawTx && (
+            <div data-testid="raw-tx-decode-result" className="flex flex-col gap-2 text-xs">
+              <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1 text-muted">
+                <span>
+                  Signature:{" "}
+                  <strong
+                    data-testid="raw-tx-sig-status"
+                    className={
+                      inspectedRawTx.signatureValid ? "text-emerald-400" : "text-red-400"
+                    }
+                  >
+                    {inspectedRawTx.signatureValid ? "VALID" : "INVALID"}
+                  </strong>
+                </span>
+                <span>
+                  Method: <strong className="text-gold">{inspectedRawTx.method}</strong>
+                </span>
+                <span>
+                  Nonce: <strong className="text-fg">{inspectedRawTx.nonce}</strong>
+                </span>
+                <span>
+                  Fee: <strong className="text-fg">{inspectedRawTx.fee}</strong>
+                </span>
+                <span>
+                  Size: <strong className="text-fg">{inspectedRawTx.wireSizeBytes}B</strong>
+                </span>
+              </div>
+              <pre
+                data-testid="raw-tx-decode-json"
+                className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto max-h-72"
+              >
+                {JSON.stringify(inspectedRawTx, null, 2)}
+              </pre>
+            </div>
+          )}
+        </div>
+
+        {/* RPC Node Capability Probe */}
+        <div className="flex flex-col gap-3 border-t border-border pt-4">
+          <h3 className="text-xs font-semibold text-muted uppercase tracking-wider">
+            RPC Node Capability Probe
+          </h3>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+            <div className="md:col-span-2">
+              <label
+                htmlFor="node-probe-url-input"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                Target RPC Endpoint URL
+              </label>
+              <input
+                id="node-probe-url-input"
+                data-testid="node-probe-url-input"
+                type="text"
+                value={nodeProbeUrlInput}
+                onChange={(e) => setNodeProbeUrlInput(e.target.value)}
+                placeholder="http://127.0.0.1:8545/rpc"
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="node-probe-expected-chain-input"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                Expected Chain ID (optional)
+              </label>
+              <input
+                id="node-probe-expected-chain-input"
+                data-testid="node-probe-expected-chain-input"
+                type="number"
+                min={0}
+                value={nodeProbeExpectedChainStr}
+                onChange={(e) => setNodeProbeExpectedChainStr(e.target.value)}
+                placeholder="any"
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              data-testid="run-node-probe-btn"
+              disabled={isProbingNode}
+              onClick={async () => {
+                setIsProbingNode(true);
+                setNodeProbeResult(null);
+                try {
+                  const trimmedExpected = nodeProbeExpectedChainStr.trim();
+                  const expectedChainId =
+                    trimmedExpected.length > 0 ? BigInt(trimmedExpected) : undefined;
+                  const res = await runNodeCapabilityProbe(nodeProbeUrlInput.trim(), {
+                    ...(expectedChainId !== undefined ? { expectedChainId } : {}),
+                  });
+                  setNodeProbeResult(res);
+                } catch (err: unknown) {
+                  setNodeProbeResult({
+                    ok: false,
+                    url: nodeProbeUrlInput.trim(),
+                    batchSupported: false,
+                    canonicalTagMatch: null,
+                    latencyMs: 0,
+                    error: err instanceof Error ? err.message : String(err),
+                  });
+                } finally {
+                  setIsProbingNode(false);
+                }
+              }}
+              className="px-4 py-2 bg-gold/20 hover:bg-gold/30 rounded-lg border border-gold/40 text-gold text-xs font-semibold transition-colors disabled:opacity-50"
+            >
+              {isProbingNode ? "Probing Node..." : "Probe Node Capabilities"}
+            </button>
+          </div>
+
+          {nodeProbeResult && (
+            <div data-testid="node-probe-result" className="flex flex-col gap-2 text-xs">
+              <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1 text-muted">
+                <span>
+                  Status:{" "}
+                  <strong
+                    className={
+                      nodeProbeResult.ok ? "text-emerald-400" : "text-red-400"
+                    }
+                  >
+                    {nodeProbeResult.ok ? "OK" : "FAILED"}
+                  </strong>
+                </span>
+                <span>
+                  Network Tag:{" "}
+                  <strong className="text-fg">
+                    {nodeProbeResult.networkTag ?? "—"}
+                  </strong>
+                  {nodeProbeResult.canonicalTagMatch !== null && (
+                    <span
+                      className={
+                        nodeProbeResult.canonicalTagMatch
+                          ? " text-emerald-400"
+                          : " text-red-400"
+                      }
+                    >
+                      {" "}
+                      ({nodeProbeResult.canonicalTagMatch ? "canonical" : "mismatch"})
+                    </span>
+                  )}
+                </span>
+                <span>
+                  RPC Version:{" "}
+                  <strong className="text-fg">
+                    {nodeProbeResult.rpcVersion ?? "—"}
+                  </strong>
+                </span>
+                <span>
+                  Batch:{" "}
+                  <strong
+                    className={
+                      nodeProbeResult.batchSupported ? "text-emerald-400" : "text-amber-400"
+                    }
+                  >
+                    {nodeProbeResult.batchSupported ? "Supported" : "Unsupported"}
+                  </strong>
+                </span>
+                <span>
+                  Latency:{" "}
+                  <strong className="text-gold">{nodeProbeResult.latencyMs} ms</strong>
+                </span>
+              </div>
+
+              {nodeProbeResult.error && (
+                <div className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3">
+                  {nodeProbeResult.error}
+                </div>
+              )}
+
+              <pre
+                data-testid="node-probe-json"
+                className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto max-h-72"
+              >
+                {JSON.stringify(nodeProbeResult, null, 2)}
+              </pre>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Multi-Endpoint Failover RPC Probe */}
+      <div
+        className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-4"
+        data-testid="failover-rpc-probe-panel"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
+          <div>
+            <h2 className="text-sm font-semibold text-fg">
+              Failover RPC Endpoint Probe
+            </h2>
+            <p className="text-xs text-muted">
+              Probe multiple JSON-RPC endpoints with <code className="font-mono text-fg">FailoverHttpTransport</code> health checks and cooldown tracking
+            </p>
+          </div>
+          <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-surface-2 border border-border text-gold">
+            FailoverHttpTransport
+          </span>
+        </div>
+          <div>
+            <label
+              htmlFor="failover-urls-input"
+              className="block text-xs font-medium text-muted mb-1"
+            >
+              RPC Endpoints (comma or newline separated, primary first)
+            </label>
+            <textarea
+              id="failover-urls-input"
+              data-testid="failover-urls-input"
+              rows={3}
+              value={failoverUrlsInput}
+              onChange={(e) => setFailoverUrlsInput(e.target.value)}
+              placeholder={"https://rpc-testnet.kovanica.online/rpc\nhttp://127.0.0.1:8545/rpc"}
+              className="w-full bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+            />
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              data-testid="run-failover-probe-btn"
+              disabled={isProbingFailover}
+              onClick={async () => {
+                setIsProbingFailover(true);
+                setFailoverProbeResult(null);
+                try {
+                  const res = await probeFailoverRpcEndpoints(failoverUrlsInput);
+                  setFailoverProbeResult(res);
+                } finally {
+                  setIsProbingFailover(false);
+                }
+              }}
+              className="px-4 py-2 bg-gold/20 hover:bg-gold/30 rounded-lg border border-gold/40 text-gold text-xs font-semibold transition-colors disabled:opacity-50"
+            >
+              {isProbingFailover ? "Probing Endpoints..." : "Probe Failover Endpoints"}
+            </button>
+          </div>
+
+          {failoverProbeResult && (
+            <div data-testid="failover-probe-result" className="flex flex-col gap-2 text-xs">
+              <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1 text-muted">
+                <span>
+                  Status:{" "}
+                  <strong
+                    className={
+                      failoverProbeResult.ok ? "text-emerald-400" : "text-red-400"
+                    }
+                  >
+                    {failoverProbeResult.ok ? "OK" : "FAILED"}
+                  </strong>
+                </span>
+                {failoverProbeResult.chainId !== undefined && (
+                  <span>
+                    Chain ID: <strong className="text-fg">{failoverProbeResult.chainId}</strong>
+                  </span>
+                )}
+                {failoverProbeResult.blockNumber !== undefined && (
+                  <span>
+                    Block: <strong className="text-gold">{failoverProbeResult.blockNumber}</strong>
+                  </span>
+                )}
+                <span>
+                  Failovers: <strong className="text-fg">{failoverProbeResult.failoverEvents.length}</strong>
+                </span>
+              </div>
+
+              {failoverProbeResult.error && (
+                <div className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3">
+                  {failoverProbeResult.error}
+                </div>
+              )}
+
+              {failoverProbeResult.activeEndpoints.length > 0 && (
+                <div className="flex flex-col gap-1.5">
+                  {failoverProbeResult.activeEndpoints.map((ep, idx) => (
+                    <div
+                      key={`${ep.url}-${idx}`}
+                      className="bg-surface-2 border border-border rounded-lg px-3 py-2 font-mono flex flex-wrap items-center justify-between gap-2"
+                    >
+                      <span className="text-fg break-all">{ep.url}</span>
+                      <div className="flex items-center gap-3 text-[11px]">
+                        <span
+                          className={
+                            ep.healthy ? "text-emerald-400" : "text-red-400"
+                          }
+                        >
+                          {ep.state} ({ep.healthy ? "healthy" : "cooldown"})
+                        </span>
+                        <span className="text-muted">
+                          ok:{ep.totalSuccesses} err:{ep.totalFailures}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+      </div>
+
+      {/* Address Inspector & Transfer Tx Verifier Panel */}
+      <div
+        className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-5"
+        data-testid="address-and-transfer-panel"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
+          <div>
+            <h2 className="text-sm font-semibold text-fg">
+              Address Inspector &amp; Transfer Tx Verifier
+            </h2>
+            <p className="text-xs text-muted">
+              Inspect PRO-21 (kvnc...dag / tknc...dag) or legacy 64-hex addresses against Chain 1/2/3 policy and verify raw signed Transfer transactions offline
+            </p>
+          </div>
+          <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-surface-2 border border-border text-gold">
+            PRO-21 + Ed25519
+          </span>
+        </div>
+
+        {/* Address Inspector */}
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-xs font-semibold text-muted uppercase tracking-wider">
+              Address Inspector (Chain 1 / 2 / 3 Policy)
+            </h3>
+            {activeAccount && (
+              <button
+                type="button"
+                data-testid="load-active-address-btn"
+                onClick={() => {
+                  setAddressInspectInput(activeAccount.address);
+                  setAddressInspectChainStr(String(selectedChainId));
+                }}
+                className="px-2.5 py-1 text-xs bg-surface-2 hover:bg-border rounded border border-border text-muted hover:text-fg transition-colors"
+              >
+                Use Active Account Address
+              </button>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+            <div className="md:col-span-2">
+              <label
+                htmlFor="address-inspect-input"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                Address (kvnc...dag, tknc...dag, or 64-hex)
+              </label>
+              <input
+                id="address-inspect-input"
+                data-testid="address-inspect-input"
+                type="text"
+                value={addressInspectInput}
+                onChange={(e) => setAddressInspectInput(e.target.value)}
+                placeholder="kvnc...dag, tknc...dag, or 0x..."
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+
+            <div>
+              <label
+                htmlFor="address-inspect-chain-select"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                Chain Policy
+              </label>
+              <select
+                id="address-inspect-chain-select"
+                data-testid="address-inspect-chain-select"
+                value={addressInspectChainStr}
+                onChange={(e) => setAddressInspectChainStr(e.target.value)}
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              >
+                <option value="">Any (no chain policy)</option>
+                <option value="1">Mainnet (Chain 1)</option>
+                <option value="2">Testnet (Chain 2)</option>
+                <option value="3">Devnet (Chain 3)</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              data-testid="inspect-address-btn"
+              onClick={() => {
+                const expectedChainId =
+                  addressInspectChainStr.trim().length > 0
+                    ? Number(addressInspectChainStr)
+                    : undefined;
+                setAddressInspectResult(inspectAddress(addressInspectInput, expectedChainId));
+              }}
+              className="px-4 py-2 bg-gold hover:bg-gold/90 text-bg rounded-lg text-xs font-semibold transition-colors"
+            >
+              Inspect Address
+            </button>
+          </div>
+
+          {addressInspectResult && (
+            <div data-testid="address-inspect-result" className="flex flex-col gap-2 text-xs">
+              <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1 text-muted">
+                <span>
+                  Valid:{" "}
+                  <strong
+                    data-testid="address-inspect-valid"
+                    className={addressInspectResult.valid ? "text-emerald-400" : "text-red-400"}
+                  >
+                    {addressInspectResult.valid ? "YES" : "NO"}
+                  </strong>
+                </span>
+                <span>
+                  Format: <strong className="text-gold">{addressInspectResult.format}</strong>
+                </span>
+                <span>
+                  Checksum:{" "}
+                  <strong
+                    className={
+                      addressInspectResult.checksumValid ? "text-emerald-400" : "text-red-400"
+                    }
+                  >
+                    {addressInspectResult.checksumValid ? "VALID" : "INVALID"}
+                  </strong>
+                </span>
+                <span>
+                  Chain Allowed:{" "}
+                  <strong
+                    className={
+                      addressInspectResult.chainAllowed === null
+                        ? "text-muted"
+                        : addressInspectResult.chainAllowed
+                          ? "text-emerald-400"
+                          : "text-red-400"
+                    }
+                  >
+                    {addressInspectResult.chainAllowed === null
+                      ? "N/A"
+                      : addressInspectResult.chainAllowed
+                        ? "ALLOWED"
+                        : "REJECTED"}
+                  </strong>
+                </span>
+              </div>
+
+              {addressInspectResult.error && (
+                <div className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3">
+                  {addressInspectResult.error}
+                </div>
+              )}
+
+              <pre
+                data-testid="address-inspect-json"
+                className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto max-h-60"
+              >
+                {JSON.stringify(addressInspectResult, null, 2)}
+              </pre>
+            </div>
+          )}
+        </div>
+
+        {/* Offline Transfer Tx Verifier */}
+        <div className="flex flex-col gap-3 border-t border-border pt-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-xs font-semibold text-muted uppercase tracking-wider">
+              Offline Signed Transfer Tx Verifier
+            </h3>
+            {signedResult?.rawTxHex && lastSignedKind === "transfer" && (
+              <button
+                type="button"
+                data-testid="load-signed-transfer-tx-btn"
+                onClick={() => {
+                  setTransferTxHexInput(signedResult.rawTxHex);
+                  setTransferTxChainIdStr(String(selectedChainId));
+                  setTransferTxInspectError(null);
+                }}
+                className="px-2.5 py-1 text-xs bg-surface-2 hover:bg-border rounded border border-border text-muted hover:text-fg transition-colors"
+              >
+                Load Last Signed Transfer
+              </button>
+            )}
+          </div>
+
+          <textarea
+            id="transfer-tx-hex-input"
+            data-testid="transfer-tx-hex-input"
+            rows={3}
+            value={transferTxHexInput}
+            onChange={(e) => setTransferTxHexInput(e.target.value)}
+            placeholder="Paste raw signed Transfer transaction hex (0x... or bare 196-byte hex)..."
+            className="w-full bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+          />
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+            <div>
+              <label
+                htmlFor="transfer-tx-chain-id-input"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                Chain ID (for sighash)
+              </label>
+              <input
+                id="transfer-tx-chain-id-input"
+                data-testid="transfer-tx-chain-id-input"
+                type="number"
+                min={0}
+                value={transferTxChainIdStr}
+                onChange={(e) => setTransferTxChainIdStr(e.target.value)}
+                placeholder={String(selectedChainId)}
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+
+            <div className="md:col-span-2">
+              <label
+                htmlFor="transfer-tx-pubkey-input"
+                className="block text-xs font-medium text-muted mb-1"
+              >
+                Signer Public Key Hex Override (optional, defaults to tx sender)
+              </label>
+              <input
+                id="transfer-tx-pubkey-input"
+                data-testid="transfer-tx-pubkey-input"
+                type="text"
+                value={transferTxPubkeyHex}
+                onChange={(e) => setTransferTxPubkeyHex(e.target.value)}
+                placeholder="64-char hex pubkey (optional)"
+                className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              data-testid="decode-transfer-tx-btn"
+              onClick={() => {
+                setTransferTxInspectError(null);
+                setInspectedTransferTx(null);
+                try {
+                  const trimmedChain = transferTxChainIdStr.trim();
+                  const parsedChainId =
+                    trimmedChain.length > 0 ? BigInt(trimmedChain) : BigInt(selectedChainId);
+                  const inspected = inspectRawSignedTransferTx(transferTxHexInput, {
+                    chainId: parsedChainId,
+                    publicKeyHex: transferTxPubkeyHex.trim() || undefined,
+                  });
+                  setInspectedTransferTx(inspected);
+                } catch (err: unknown) {
+                  if (err instanceof KovanicaDecodeError) {
+                    setTransferTxInspectError(`[${err.code}] ${err.message}`);
+                  } else {
+                    setTransferTxInspectError(err instanceof Error ? err.message : String(err));
+                  }
+                }
+              }}
+              className="px-4 py-2 bg-gold/20 hover:bg-gold/30 rounded-lg border border-gold/40 text-gold text-xs font-semibold transition-colors"
+            >
+              Decode &amp; Verify Transfer Tx
+            </button>
+          </div>
+
+          {transferTxInspectError && (
+            <div
+              data-testid="transfer-tx-decode-error"
+              className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3"
+            >
+              {transferTxInspectError}
+            </div>
+          )}
+
+          {inspectedTransferTx && (
+            <div data-testid="transfer-tx-decode-result" className="flex flex-col gap-2 text-xs">
+              <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1 text-muted">
+                <span>
+                  Signature:{" "}
+                  <strong
+                    data-testid="transfer-tx-sig-status"
+                    className={
+                      inspectedTransferTx.signatureValid ? "text-emerald-400" : "text-red-400"
+                    }
+                  >
+                    {inspectedTransferTx.signatureValid ? "VALID" : "INVALID"}
+                  </strong>
+                </span>
+                <span>
+                  Amount: <strong className="text-gold">{inspectedTransferTx.amount}</strong>
+                </span>
+                <span>
+                  Nonce: <strong className="text-fg">{inspectedTransferTx.nonce}</strong>
+                </span>
+                <span>
+                  Fee: <strong className="text-fg">{inspectedTransferTx.fee}</strong>
+                </span>
+                <span>
+                  Size: <strong className="text-fg">{inspectedTransferTx.wireSizeBytes}B</strong>
+                </span>
+              </div>
+              <pre
+                data-testid="transfer-tx-decode-json"
+                className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto max-h-72"
+              >
+                {JSON.stringify(inspectedTransferTx, null, 2)}
+              </pre>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Transaction Receipt Poller & Log Decoder (`kovanica_getTransactionReceipt`) */}
+      <div
+        className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-4"
+        data-testid="receipt-poller-panel"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
+          <div>
+            <h2 className="text-sm font-semibold text-fg">
+              Transaction Receipt Poller & Log Decoder (kovanica_getTransactionReceipt)
+            </h2>
+            <p className="text-xs text-muted">
+              Poll <code className="font-mono text-fg">kovanica_getTransactionReceipt</code> until finalized and decode emitted Bincode 1.x log payloads
+            </p>
+          </div>
+          <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-surface-2 border border-border text-gold">
+            kovanica_getTransactionReceipt
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+          <div className="md:col-span-2">
+            <label
+              htmlFor="receipt-tx-hash-input"
+              className="block text-xs font-medium text-muted mb-1"
+            >
+              Transaction Hash (32-byte hex)
+            </label>
+            <input
+              id="receipt-tx-hash-input"
+              data-testid="receipt-tx-hash-input"
+              type="text"
+              value={receiptTxHash}
+              onChange={(e) => setReceiptTxHash(e.target.value)}
+              placeholder="0x... (64 hex characters)"
+              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+            />
+          </div>
+
+          <div>
+            <label
+              htmlFor="receipt-decoder-kind-select"
+              className="block text-xs font-medium text-muted mb-1"
+            >
+              Log Bincode Decoder Type (optional)
+            </label>
+            <select
+              id="receipt-decoder-kind-select"
+              data-testid="receipt-decoder-kind-select"
+              value={receiptDecoderKind}
+              onChange={(e) =>
+                setReceiptDecoderKind(e.target.value as ContractDecoderKind | "")
+              }
+              className="w-full bg-surface-2 border border-border rounded-lg px-3 py-2 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+            >
+              <option value="">None (Raw Hex Logs Only)</option>
+              <option value="name">NameRecord — decodeNameRecord</option>
+              <option value="htlc">HtlcRecord — decodeHtlcRecord</option>
+              <option value="escrow">EscrowRecord — decodeEscrowRecord</option>
+              <option value="vault">VaultRecord — decodeVaultRecord</option>
+              <option value="token_metadata">TokenMetadata — decodeTokenMetadata</option>
+              <option value="nft_metadata">NftMetadata — decodeNftMetadata</option>
+              <option value="multisig">MultisigState — decodeMultisigState</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            data-testid="poll-receipt-btn"
+            disabled={isPollingReceipt}
+            onClick={async () => {
+              setReceiptPollError(null);
+              setReceiptPollResult(null);
+              setIsPollingReceipt(true);
+              try {
+                const res = await pollAndDecodeTransactionReceipt(client, {
+                  txHash: receiptTxHash,
+                  decoderKind: receiptDecoderKind || undefined,
+                });
+                setReceiptPollResult(res);
+              } catch (err: unknown) {
+                if (err instanceof KovanicaDecodeError) {
+                  setReceiptPollError(`[${err.code}] ${err.message}`);
+                } else {
+                  setReceiptPollError(
+                    err instanceof Error ? err.message : String(err),
+                  );
+                }
+              } finally {
+                setIsPollingReceipt(false);
+              }
+            }}
+            className="px-4 py-2 bg-gold hover:bg-gold/90 text-bg rounded-lg text-xs font-semibold transition-colors disabled:opacity-50"
+          >
+            {isPollingReceipt
+              ? "Polling Receipt..."
+              : "Fetch / Poll Receipt & Decode Logs"}
+          </button>
+        </div>
+
+        {receiptPollError && (
+          <div
+            data-testid="receipt-poller-error"
+            className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3"
+          >
+            {receiptPollError}
+          </div>
+        )}
+
+        {receiptPollResult && (
+          <div
+            data-testid="receipt-poller-result"
+            className="flex flex-col gap-3 text-xs"
+          >
+            <div
+              data-testid="receipt-poller-summary"
+              className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1.5 text-muted"
+            >
+              <span>
+                Status:{" "}
+                <strong
+                  data-testid="receipt-status-badge"
+                  className={
+                    receiptPollResult.status === "success"
+                      ? "text-emerald-400"
+                      : "text-red-400"
+                  }
+                >
+                  {receiptPollResult.status}
+                </strong>
+              </span>
+              <span>
+                Gas Used:{" "}
+                <strong data-testid="receipt-gas-used" className="text-fg">
+                  {receiptPollResult.gasUsed.toString()}
+                </strong>
+              </span>
+              <span>
+                Block Hash:{" "}
+                <strong
+                  data-testid="receipt-block-hash"
+                  className="text-fg break-all"
+                >
+                  {receiptPollResult.blockHash || "—"}
+                </strong>
+              </span>
+              <span>
+                Decoded Logs:{" "}
+                <strong className="text-gold">
+                  {receiptPollResult.decodedLogs.length}
+                </strong>
+              </span>
+            </div>
+
+            {receiptPollResult.decodedLogs.length > 0 && (
+              <pre
+                data-testid="receipt-decoded-logs"
+                className="bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg overflow-x-auto"
+              >
+                {JSON.stringify(
+                  receiptPollResult.decodedLogs,
+                  (_key, value) =>
+                    typeof value === "bigint" ? value.toString() : value,
+                  2,
+                )}
+              </pre>
+            )}
+
+            {receiptPollResult.decodeErrors.length > 0 && (
+              <div
+                data-testid="receipt-decode-errors"
+                className="text-xs font-mono text-amber-300 bg-amber-950/30 border border-amber-800/50 rounded-lg p-3"
+              >
+                {receiptPollResult.decodeErrors.map((e) => (
+                  <div key={e.logIndex}>
+                    Log #{e.logIndex} ({e.decoderKind}): {e.error}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* JSON-RPC 2.0 Batch Read Runner */}
+      <div
+        className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-4"
+        data-testid="jsonrpc-batch-runner-panel"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
+          <div>
+            <h2 className="text-sm font-semibold text-fg">
+              JSON-RPC 2.0 Batch Read Runner (Single HTTP POST)
+            </h2>
+            <p className="text-xs text-muted">
+              Bundle 1..{MAX_JSONRPC_BATCH_SIZE} allowlisted read-only RPC calls into one{" "}
+              <code className="font-mono text-fg">client.callBatch</code> round-trip with per-item error isolation
+            </p>
+          </div>
+          <span className="px-2 py-0.5 text-[11px] font-mono rounded bg-surface-2 border border-border text-gold">
+            max {MAX_JSONRPC_BATCH_SIZE} / batch
+          </span>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            data-testid="rpc-batch-preset-chain"
+            onClick={() => {
+              setRpcBatchInput(JSON.stringify(DEFAULT_JSONRPC_READ_BATCH_PRESET, null, 2));
+              setRpcBatchError(null);
+            }}
+            className="px-2.5 py-1 text-xs bg-surface-2 hover:bg-border rounded border border-border text-muted hover:text-fg transition-colors"
+          >
+            Chain Snapshot (chainId + blockNumber + estimateFee)
+          </button>
+          <button
+            type="button"
+            data-testid="rpc-batch-preset-health"
+            onClick={() => {
+              const healthPreset: JsonRpcBatchRequestItem[] = [
+                { method: "kovanica_chainId", params: [] },
+                { method: "kovanica_syncStatus", params: [] },
+                { method: "kovanica_getMiningInfo", params: [] },
+                { method: "kovanica_getDagTips", params: [] },
+              ];
+              setRpcBatchInput(JSON.stringify(healthPreset, null, 2));
+              setRpcBatchError(null);
+            }}
+            className="px-2.5 py-1 text-xs bg-surface-2 hover:bg-border rounded border border-border text-muted hover:text-fg transition-colors"
+          >
+            Node Health (chainId + syncStatus + miningInfo + dagTips)
+          </button>
+        </div>
+
+        <div className="flex flex-col gap-1.5">
+          <label
+            htmlFor="jsonrpc-batch-input"
+            className="block text-xs font-medium text-muted"
+          >
+            Batch Requests JSON Array (Read-Only Methods Only)
+          </label>
+          <textarea
+            id="jsonrpc-batch-input"
+            data-testid="jsonrpc-batch-input"
+            rows={5}
+            value={rpcBatchInput}
+            onChange={(e) => setRpcBatchInput(e.target.value)}
+            className="w-full bg-surface-2 border border-border rounded-lg p-3 text-xs font-mono text-fg focus:outline-none focus:border-gold"
+          />
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            data-testid="run-jsonrpc-batch-btn"
+            disabled={isRunningRpcBatch}
+            onClick={async () => {
+              setRpcBatchError(null);
+              setRpcBatchSummary(null);
+              setIsRunningRpcBatch(true);
+              try {
+                let parsed: unknown;
+                try {
+                  parsed = JSON.parse(rpcBatchInput);
+                } catch (parseErr: unknown) {
+                  throw new KovanicaDecodeError(
+                    "INVALID_INPUT",
+                    `Malformed batch JSON: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
+                    { field: "requests" },
+                  );
+                }
+                const summary = await executeJsonRpcReadBatch(
+                  client,
+                  parsed as JsonRpcBatchRequestItem[],
+                );
+                setRpcBatchSummary(summary);
+              } catch (err: unknown) {
+                if (err instanceof KovanicaDecodeError) {
+                  setRpcBatchError(`[${err.code}] ${err.message}`);
+                } else {
+                  setRpcBatchError(err instanceof Error ? err.message : String(err));
+                }
+              } finally {
+                setIsRunningRpcBatch(false);
+              }
+            }}
+            className="px-4 py-2 bg-gold hover:bg-gold/90 text-bg rounded-lg text-xs font-semibold transition-colors disabled:opacity-50"
+          >
+            {isRunningRpcBatch
+              ? "Running Batch..."
+              : "Run JSON-RPC Batch (Single HTTP POST)"}
+          </button>
+        </div>
+
+        {rpcBatchError && (
+          <div
+            data-testid="jsonrpc-batch-error"
+            className="text-xs font-mono text-red-300 bg-red-950/40 border border-red-800/60 rounded-lg p-3"
+          >
+            {rpcBatchError}
+          </div>
+        )}
+
+        {rpcBatchSummary && (
+          <div
+            data-testid="jsonrpc-batch-result"
+            className="flex flex-col gap-3 text-xs"
+          >
+            <div className="bg-surface-2/80 border border-border rounded-lg p-3 font-mono flex flex-wrap items-center gap-x-5 gap-y-1.5 text-muted">
+              <span>
+                Total: <strong className="text-fg">{rpcBatchSummary.totalRequests}</strong>
+              </span>
+              <span>
+                OK: <strong className="text-emerald-400">{rpcBatchSummary.succeededCount}</strong>
+              </span>
+              <span>
+                Failed: <strong className="text-red-400">{rpcBatchSummary.failedCount}</strong>
+              </span>
+              <span>
+                Elapsed: <strong className="text-gold">{rpcBatchSummary.elapsedMs} ms</strong>
+              </span>
+            </div>
+
+            <div className="flex flex-col gap-2">
+              {rpcBatchSummary.items.map((item) => (
+                <div
+                  key={item.index}
+                  className={`p-3 rounded-lg border font-mono text-xs flex flex-col gap-1.5 ${
+                    item.ok
+                      ? "bg-surface-2 border-border text-fg"
+                      : "bg-red-950/30 border-red-800/50 text-red-200"
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold">
+                      #{item.index + 1} {item.method}
+                    </span>
+                    <span
+                      className={`text-[11px] uppercase font-bold ${
+                        item.ok ? "text-emerald-400" : "text-red-400"
+                      }`}
+                    >
+                      {item.ok ? "OK" : "ERROR"}
+                    </span>
+                  </div>
+                  <pre className="text-[11px] overflow-x-auto text-muted">
+                    {JSON.stringify(
+                      item.ok ? item.result : item.error,
+                      (_key, value) =>
+                        typeof value === "bigint" ? value.toString() : value,
+                      2,
+                    )}
+                  </pre>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* Account History & Watch-Only Inspector */}
       <AccountHistoryWatchOnlyPanel
@@ -3830,7 +4097,7 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
       />
 
       {/* Self-Test & Invariant Verification Suite */}
-      <div className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-4">
+      <div className="bg-surface rounded-xl border border-border p-6 flex flex-col gap-4" data-testid="golden-vector-selftest-panel">
         <div className="flex items-center justify-between border-b border-border pb-3">
           <div>
             <h2 className="text-sm font-semibold text-fg">
@@ -3877,6 +4144,7 @@ export function WalletContractConsole({ client, selectedChainId, rpcUrl }: Props
           </div>
         )}
       </div>
+      </div>
     </div>
   );
-}
+});

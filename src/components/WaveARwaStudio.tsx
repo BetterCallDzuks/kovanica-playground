@@ -117,7 +117,7 @@ export function WaveARwaStudio() {
           batchTxBytes: batch.rawBytes.length,
           batchFeeAtoms: (FIXED_FEE_SCHEDULE.deploy + FIXED_FEE_SCHEDULE.rwa_create).toString(),
           eip1559NextBaseFeeAtFullBlock: nextBase.toString(),
-          passkeyAddressHex: `0x${Buffer.from(passkeyAddr).toString("hex").slice(0, 16)}...`,
+          passkeyAddressHex: `0x${Array.from(passkeyAddr.slice(0, 8), (b) => b.toString(16).padStart(2, "0")).join("")}...`,
           schedulerCallBytes: schedBytes.length,
           bridgeInitBytes: bridgeBytes.length,
           ammSwapQuoteOut: ammQuote.amountOut.toString(),
@@ -133,14 +133,22 @@ export function WaveARwaStudio() {
   };
 
   return (
-    <section className="rounded-lg border p-4 space-y-3" data-testid="wave-a-rwa-studio">
-      <h3 className="font-semibold">Wave A–D &amp; KVP-106 RWA Studio</h3>
-      <div className="flex gap-2">
+    <section
+      className="bg-surface rounded-xl border border-border p-6 space-y-4"
+      data-testid="wave-a-rwa-studio"
+    >
+      <div className="border-b border-border pb-3">
+        <h3 className="text-base font-semibold text-fg">Wave A–D &amp; KVP-106 RWA Studio</h3>
+        <p className="text-xs text-muted mt-0.5">
+          Simulate atomic Wave A batches, EIP-1559 fees, WebAuthn passkeys, scheduler, bridge, AMM swaps, and KVP-106 RWA compliance.
+        </p>
+      </div>
+      <div className="flex flex-wrap items-center gap-3">
         <select
           aria-label="RWA Asset Class"
           value={assetClass}
           onChange={(e) => setAssetClass(e.target.value as typeof assetClass)}
-          className="border rounded px-2 py-1 text-sm"
+          className="bg-surface-2 border border-border rounded-lg px-3 py-2 text-sm text-fg focus:outline-none focus:border-gold"
         >
           <option value="RE">Real Estate (RE)</option>
           <option value="BOND">Bond (BOND)</option>
@@ -153,18 +161,21 @@ export function WaveARwaStudio() {
           aria-label="RWA Unique ID"
           value={uniqueId}
           onChange={(e) => setUniqueId(e.target.value)}
-          className="border rounded px-2 py-1 text-sm"
+          className="bg-surface-2 border border-border rounded-lg px-3 py-2 text-sm font-mono text-fg focus:outline-none focus:border-gold"
         />
         <button
           type="button"
           onClick={handleSimulateBatch}
-          className="border rounded px-3 py-1 text-sm font-medium"
+          className="px-4 py-2 bg-gold hover:bg-gold/90 text-bg font-semibold rounded-lg text-sm transition-colors"
         >
           Build 1-Tx RWA Batch
         </button>
       </div>
       {output && (
-        <pre data-testid="wave-a-rwa-output" className="text-xs overflow-x-auto">
+        <pre
+          data-testid="wave-a-rwa-output"
+          className="bg-surface-2 p-4 rounded-lg border border-border text-xs font-mono text-fg overflow-x-auto"
+        >
           {output}
         </pre>
       )}

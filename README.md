@@ -21,9 +21,10 @@ Kovanica Playground reflects the established Kovanica design system:
 
 ## Features
 
-1. **Network & Endpoint Selector:**
+1. **Network & Endpoint Selector & Ecosystem Switcher:**
    - Choose between the canonical Kovanica networks: Mainnet (`1`, official network tag `1-f35df34c92001436`), Testnet (`2`, official network tag `2-24cdb5fadd98b207`), and Devnet (`3`).
-   - Configurable RPC URL (defaults to local loopback node `http://127.0.0.1:8545/rpc`).
+   - Configurable RPC URL (defaults to local loopback node `http://127.0.0.1:8545/rpc`) with 1-click presets (`Testnet RPC` -> `https://rpc-testnet.kovanica.online/rpc`, `Mainnet RPC (Read-Only)` -> `https://rpc.kovanica.online/rpc`, and `Local 127.0.0.1:8545` -> `http://127.0.0.1:8545/rpc`).
+   - Header and footer **Ecosystem Switcher** linking to `kovanica.online`, `testnet.kovanica.online`, Explorer, Wallet, Swap & Pools, RWA, and Docs.
    - **Chain Mismatch Warning:** Alerts the developer immediately if the connected node reports a Chain ID that does not match the active target network.
    - **Honest Connectivity Diagnostics:** Surfaces detailed connection failure diagnostics explaining possible root causes (node offline, port closed, network unreachable, CORS) without falsely claiming CORS is confirmed without evidence.
 
@@ -43,34 +44,31 @@ Kovanica Playground reflects the established Kovanica design system:
    - Aborts in-flight requests when switching methods or endpoints.
    - Instantly clears stale network and mining diagnostics upon endpoint change, and discards delayed in-flight responses from prior endpoints.
 
-5. **Interactive Developer Studios (`kovanica-sdk v0.7.0`):**
-   - **Typed Contract Facades Studio:** Direct read workflows across all 7 canonical Wasmi contract clients (`NameRegistryClient`, `TokenClient`, `EscrowClient`, `HtlcClient`, `NftClient`, `VaultClient`, `MultisigClient`), BLAKE3 storage slot derivation, and typed Bincode state decoding.
-   - **Storage Slot Deriver Studio:** Interactive BLAKE3 storage slot derivation (`deriveStorageSlotHex` & `derivePrefixedStorageSlot`) supporting canonical contract slots, raw hex, UTF-8, and mapping keys with optional live `readContractStorage` / `kovanica_getStorageAt` queries and Bincode decoding.
+5. **Interactive Developer Studios (`kovanica-sdk v0.9.0`):**
+   - **4-Group Wallet & Contracts Workspace:** Reorganized into four persistent sub-tabs with quick-jump tool rails:
+     1. **HD Wallet & Signer:** Ephemeral SLIP-0010 HD Wallet, Native Transfer Signing Console, Universal Tx Auto-Decoder & Air-Gap Envelope (`kvnc-tx:v1:`) Studio, and Mempool Fee-Tier Estimator.
+     2. **Contracts & Codegen:** Wasmi Contract Call Builder + Multi-Call Batch Estimator + cURL/SDK Code Exporter + JSON Presets, and Typed Contract Facades Studio across all 7 canonical clients (`NameRegistryClient`, `TokenClient`, `EscrowClient`, `HtlcClient`, `NftClient`, `VaultClient`, `MultisigClient`).
+     3. **Storage & Logs:** Storage Slot Deriver Studio (`deriveStorageSlotHex` & `derivePrefixedStorageSlot`), Contract State Bincode Decoder & Live Storage Slot Fetcher (`kovanica_getStorageAt`), Paginated Contract Logs Explorer (`queryContractLogsPaginated`, `parseContractLogCursor`, `formatContractLogCursor`), and Chunked Contract Log History Explorer (`getContractLogHistory`).
+     4. **Verification & Diagnostics:** Raw Wire Tx Decoder & Node Capability Probe, Failover RPC Endpoint Probe (`FailoverHttpTransport`), Address Inspector & Transfer Tx Verifier, Transaction Receipt Poller & Log Decoder, JSON-RPC 2.0 Batch Read Runner, Account History & Watch-Only Inspector, Fee Tiers & Multisig Quorum Inspector, and Golden Vector & Consensus Invariant Runner.
+   - **Wave A–D, Native AMM & KVP-106 RWA Studio:** Simulates atomic 1-tx RWA creation batches, EIP-1559 base fee transitions, WebAuthn passkeys, scheduler jobs, bridge initialization, AMM swap quotes/batches, and KVP-106 allowlist/dividend compliance.
    - **Inline WS Bincode Log Decoder & Live Block+Receipt Streamer:** Live WebSocket subscription console (`KovanicaWsClient`) with inline Bincode contract event decoding, plus `subscribeNewBlocksWithReceipts` streaming with configurable `maxQueueSize` backpressure cap, receipt status summaries, and `droppedCount` telemetry.
-   - **Paginated Contract Logs Explorer (`kovanica-sdk v0.7.0`):** Max-span-chunked, cursor-paginated `queryContractLogsPaginated` explorer with PRO-21 contract address filtering, positional topic filtering, optional inline Bincode decoding, `chunksScanned` / `pagesFetched` telemetry, and "Load Next Page" cursor resumption (`parseContractLogCursor`, `formatContractLogCursor`).
-   - **Contract Log History & Failover RPC Tester:** Chunked `getContractLogHistory` queries alongside a `FailoverHttpTransport` multi-endpoint health and automatic failover probe.
-   - **Raw Wire Tx Decoder & Node Capability Probe:** Offline Wasmi Call transaction decoding & Ed25519 signature verification (`decodeSignedCallTransaction`, `verifyCallTransactionSignature`) paired with `probeRpcNode` capability, batch-support, and canonical network-tag checks.
-   - **Address Inspector & Transfer Tx Verifier:** Chain-aware PRO-21 / legacy address validation (`inspectAddress`) plus offline native Transfer transaction decoding and signature verification (`decodeSignedTransferTransaction`, `verifyTransferTransactionSignature`).
-   - **Universal Tx Auto-Decoder & Air-Gap Envelope Studio:** Automatic Transfer/Call variant detection (`peekTransactionVariant`, `decodeSignedTransactionAuto`, `verifySignedTransactionAuto`) and `kvnc-tx:v1:` BLAKE3-checksummed air-gap envelope wrapping and verification.
-   - **Mempool Fee-Tier Estimator (`kovanica_mempoolStats`):** Live `economy`, `standard`, and `priority` fee-per-byte recommendations powered by `kovanica-sdk` (`parseMempoolFeeStats`, `computeFeeRecommendations`) with graceful legacy `kovanica_estimateFee` fallback.
-   - **Priority Fee Tier Lab & Air-Gapped Multisig Quorum Inspector:** Live `slow` / `standard` / `fast` fee tier estimation (`estimatePriorityFeeTiers`), lossless Replace-By-Fee bump calculations (`computeRbfFeeBump` at `+15%`, `+25%`, `+50%`), and read-only `kovanica-multisig-bundle-v1` quorum inspection (`encodeMultisigProposalBundle`, `decodeMultisigProposalBundle`, `checkMultisigQuorum`) with zero secret handling.
 
 ---
 
 ## Tested SDK Revision & Immutable Resolution
 
-`kovanica-playground` consumes `kovanica-sdk` at the pinned, immutable git revision [`4694165cbf12a03c89c20c18b3dea462019d5c6c`](https://github.com/BetterCallDzuks/kovanica-sdk/commit/4694165cbf12a03c89c20c18b3dea462019d5c6c):
+`kovanica-playground` consumes `kovanica-sdk` at the pinned, immutable git revision [`d1e757d4644583be5e2fca236bf826209f813b1a`](https://github.com/BetterCallDzuks/kovanica-sdk/commit/d1e757d4644583be5e2fca236bf826209f813b1a):
 
-- **Manifest Metadata (`package.json`):** Recorded in `kovanicaSdk.testedRevision` (`4694165cbf12a03c89c20c18b3dea462019d5c6c`) and linked via `"kovanica-sdk": "file:../kovanica-sdk"` in `package.json` and `package-lock.json`.
-- **Automated Verification (`scripts/prepare-sdk.mjs`):** Running `npm run prepare:sdk` (also invoked automatically during `npm run build`) verifies that `../kovanica-sdk` exists, is checked out at the exact pinned 40-character SHA `4694165cbf12a03c89c20c18b3dea462019d5c6c` (never following a moving `main`), and has compiled `dist/index.js`. If `../kovanica-sdk` is on a different branch or dirty, it materializes the pinned revision into `node_modules/kovanica-sdk` from an isolated worktree without modifying the sibling checkout.
-- **CI Enforcement (`.github/workflows/ci.yml` & `tests/methods.test.ts`):** GitHub Actions explicitly checks out `BetterCallDzuks/kovanica-sdk` at `ref: 4694165cbf12a03c89c20c18b3dea462019d5c6c`, and unit tests assert that `package.json`, `.github/workflows/ci.yml`, and the resolved `node_modules/kovanica-sdk` match this SHA.
+- **Manifest Metadata (`package.json`):** Recorded in `kovanicaSdk.testedRevision` (`d1e757d4644583be5e2fca236bf826209f813b1a`) and linked via `"kovanica-sdk": "file:../kovanica-sdk"` in `package.json` and `package-lock.json`.
+- **Automated Verification (`scripts/prepare-sdk.mjs`):** Running `npm run prepare:sdk` (also invoked automatically during `npm run build`) verifies that `../kovanica-sdk` exists, is checked out at the exact pinned 40-character SHA `d1e757d4644583be5e2fca236bf826209f813b1a` (never following a moving `main`), and has compiled `dist/index.js`. If `../kovanica-sdk` is on a different branch or dirty, it materializes the pinned revision into `node_modules/kovanica-sdk` from an isolated worktree without modifying the sibling checkout.
+- **CI Enforcement (`.github/workflows/ci.yml` & `tests/methods.test.ts`):** GitHub Actions explicitly checks out `BetterCallDzuks/kovanica-sdk` at `ref: d1e757d4644583be5e2fca236bf826209f813b1a`, and unit tests assert that `package.json`, `.github/workflows/ci.yml`, and the resolved `node_modules/kovanica-sdk` match this SHA.
 
 ---
 
 ## Local Integration & Build Workflow
 
 ```bash
-# 1. Verify/clone and build ../kovanica-sdk at pinned SHA 4694165cbf12a03c89c20c18b3dea462019d5c6c
+# 1. Verify/clone and build ../kovanica-sdk at pinned SHA d1e757d4644583be5e2fca236bf826209f813b1a
 npm run prepare:sdk
 
 # 2. Install playground dependencies cleanly from lockfile
@@ -144,7 +142,7 @@ In CI or isolated environments, the SDK is checked out at the exact pinned revis
 ```bash
 git clone https://github.com/BetterCallDzuks/kovanica-sdk.git
 cd kovanica-sdk
-git checkout 4694165cbf12a03c89c20c18b3dea462019d5c6c
+git checkout d1e757d4644583be5e2fca236bf826209f813b1a
 npm ci
 npm run build
 
@@ -165,10 +163,10 @@ npm run build
 | Repository | Role |
 | :--- | :--- |
 | **[BetterCallDzuks/kovanica-l1](https://github.com/BetterCallDzuks/kovanica-l1)** | Rust Layer-1 node, Hybrid PoW + GHOSTDAG consensus, Wasmi runtime, RPC, Stratum, Faucet, Indexer, Lightnode & CLI |
-| **[BetterCallDzuks/kovanica-sdk](https://github.com/BetterCallDzuks/kovanica-sdk)** | Official TypeScript SDK (`v0.7.0`) — browser & Node.js client, failover transport, facades, offline codecs, paginated log streamer, air-gap envelopes & WS block+receipt streaming |
+| **[BetterCallDzuks/kovanica-sdk](https://github.com/BetterCallDzuks/kovanica-sdk)** | Official TypeScript SDK (`v0.9.0`) — browser & Node.js client, failover transport, facades, offline codecs, paginated log streamer, air-gap envelopes, Wave A–D / AMM / RWA helpers & WS block+receipt streaming |
 | **[BetterCallDzuks/kovanica-web](https://github.com/BetterCallDzuks/kovanica-web)** | Public site, BlockDAG Explorer, Faucet, Pool portal & API Reference (`kovanica.online`) |
 | **[BetterCallDzuks/kovanica-apps](https://github.com/BetterCallDzuks/kovanica-apps)** | Client apps — `wallet-web`, `console-desktop`, `node-desktop`, `desktop`, Android & iOS |
-| **[BetterCallDzuks/kovanica-playground](https://github.com/BetterCallDzuks/kovanica-playground)** | Interactive developer RPC console & `kovanica-sdk v0.7.0` developer studios |
+| **[BetterCallDzuks/kovanica-playground](https://github.com/BetterCallDzuks/kovanica-playground)** | Interactive developer RPC console & `kovanica-sdk v0.9.0` developer studios |
 
 ---
 

@@ -835,7 +835,7 @@ export function runGoldenVectorSelfTest(): { ok: boolean; steps: SelfTestStep[] 
     dummyContractPubkey,
     "alice",
     acc1.publicKey,
-    ["https://relay1.kovanica.org", "https://relay2.kovanica.org"],
+    ["https://relay1.kovanica.online", "https://relay2.kovanica.online"],
   );
   const nameTx: UnsignedTx = {
     sender: acc0.publicKey,
