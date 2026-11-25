@@ -158,15 +158,34 @@ npm run build
 
 ---
 
+## KVP & RFC Standards Reference
+
+> Kovanica protocol proposals use **`KVP-101`..`KVP-106`** (plus **`KVP-20`** for fungible DEX pairs); the `001`..`008` numbers belong to the companion **`RFC-001`..`RFC-008`** specs.
+
+| Standard | RFC | Name | Purpose |
+| :--- | :--- | :--- | :--- |
+| **`KVP-20`** | — | Fungible Contract Token | Standard `approve`/`transfer`/`transfer_from` interface for AMM DEX & bridge tokens |
+| **`KVP-101`** | `RFC-001` | Multisig Wallets | M-of-N shared custody & spend proposals (`MultisigClient`) |
+| **`KVP-102`** | `RFC-002` | Native Multi-Asset Tokens | On-chain fungible tokens, balances, transfers & AMM pools (`TokenClient`) |
+| **`KVP-103`** | `RFC-003` | Stealth Addresses | Privacy-preserving one-time stealth addresses |
+| **`KVP-104`** | `RFC-004` | HTLC Atomic Swaps | Hash Time-Locked Contracts (`HtlcClient`) |
+| **`KVP-105`** | `RFC-005` | Time-Lock Vaults | CLTV / CSV vaults & treasury vesting (`VaultClient`) |
+| **`KVP-106`** | `RFC-007` | Real-World Assets (RWA) & Native NFTs | Institutional RWA (`WaveARwaStudio`, allowlist/freeze/coupons) & Native NFTs (`NftClient`) |
+| **`PRO-21`** | — | Canonical Address Format | 64-char `kvnc…dag` (Ed25519 + 29-bit BLAKE3 checksum) |
+| **`RFC-006`** / **`RFC-008`** | `RFC-006` / `008` | Fee Floor & Name Registry | Atoms/byte fee floor + Wave B base fee; On-chain Name Registry (`NameRegistryClient`, no KVP #) |
+
+---
+
 ## Ecosystem Repositories
 
 | Repository | Role |
 | :--- | :--- |
 | **[BetterCallDzuks/kovanica-l1](https://github.com/BetterCallDzuks/kovanica-l1)** | Rust Layer-1 node, Hybrid PoW + GHOSTDAG consensus, Wasmi runtime, RPC, Stratum, Faucet, Indexer, Lightnode & CLI |
 | **[BetterCallDzuks/kovanica-sdk](https://github.com/BetterCallDzuks/kovanica-sdk)** | Official TypeScript SDK (`v0.9.0`) — browser & Node.js client, failover transport, facades, offline codecs, paginated log streamer, air-gap envelopes, Wave A–D / AMM / RWA helpers & WS block+receipt streaming |
-| **[BetterCallDzuks/kovanica-web](https://github.com/BetterCallDzuks/kovanica-web)** | Public site, BlockDAG Explorer, Faucet, Pool portal & API Reference (`kovanica.online`) |
-| **[BetterCallDzuks/kovanica-apps](https://github.com/BetterCallDzuks/kovanica-apps)** | Client apps — `wallet-web`, `console-desktop`, `node-desktop`, `desktop`, Android & iOS |
+| **[BetterCallDzuks/kovanica-web](https://github.com/BetterCallDzuks/kovanica-web)** | Public site, BlockDAG Explorer, AMM DEX, RWA Portal, Mining Pool, Faucet, API Reference & Pricing (`kovanica.online`) |
+| **[BetterCallDzuks/kovanica-apps](https://github.com/BetterCallDzuks/kovanica-apps)** | Client apps — `wallet-web`, `browser-extension` (MV3), `console-desktop`, `node-desktop`, `desktop`, Android & iOS |
 | **[BetterCallDzuks/kovanica-playground](https://github.com/BetterCallDzuks/kovanica-playground)** | Interactive developer RPC console & `kovanica-sdk v0.9.0` developer studios |
+| **[BetterCallDzuks/Kovanica-Vault](https://github.com/BetterCallDzuks/Kovanica-Vault)** | Interactive Obsidian Vault presentation (Canvases, Bubble Graph, Pitch Deck & Standards Registry) |
 
 ---
 
