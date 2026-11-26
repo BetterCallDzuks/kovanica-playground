@@ -139,7 +139,7 @@ describe("Immutable SDK Pin & Traceability", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
     const pinnedSha = pkg?.kovanicaSdk?.testedRevision;
 
-    expect(pinnedSha).toBe("d1e757d4644583be5e2fca236bf826209f813b1a");
+    expect(pinnedSha).toBe("dbffb2509137d96d898e9edadb90ddc1d7ec6c63");
     expect(pinnedSha).toMatch(/^[0-9a-f]{40}$/);
 
     const ciWorkflow = fs.readFileSync(path.join(rootDir, ".github/workflows/ci.yml"), "utf8");
@@ -203,6 +203,10 @@ describe("Immutable SDK Pin & Traceability", () => {
     expect(distContent).toContain("computeFeeRecommendations");
     expect(distContent).toContain("getMempoolStats");
     expect(distContent).toContain("getAccountTxHistory");
+    expect(distContent).toContain("deriveOnetimeAddress");
+    expect(distContent).toContain("matchStealthAnnouncement");
+    expect(distContent).toContain("deriveOnetimeSpendKey");
+    expect(distContent).toContain("signSighashWithStealthScalar");
     expect(distContent).toContain("parseAccountTxHistoryEntry");
     expect(distContent).toContain("createWatchOnlyAccount");
     expect(distContent).toContain("parseBip44Path");
