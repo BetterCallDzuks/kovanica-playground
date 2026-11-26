@@ -16,6 +16,7 @@ import {
 import { WalletContractConsole } from "./components/WalletContractConsole";
 import { WsSubscriptionConsole } from "./components/WsSubscriptionConsole";
 import { WaveARwaStudio } from "./components/WaveARwaStudio";
+import { StealthStudio } from "./components/StealthStudio";
 
 const ECOSYSTEM_LINKS = [
   { label: "kovanica.online", href: "https://kovanica.online" },
@@ -69,7 +70,7 @@ export default function App() {
   // Target Network & Endpoint
   const [selectedChainId, setSelectedChainId] = useState<number>(CHAIN_IDS.TESTNET);
   const [rpcUrl, setRpcUrl] = useState<string>("http://127.0.0.1:8545/rpc");
-  const [mainTab, setMainTab] = useState<"rpc" | "wallet" | "ws" | "studio">("rpc");
+  const [mainTab, setMainTab] = useState<"rpc" | "wallet" | "ws" | "studio" | "stealth">("rpc");
   const [connectedNodeChainId, setConnectedNodeChainId] = useState<number | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [miningInfo, setMiningInfo] = useState<MiningInfo | null>(null);
@@ -717,6 +718,26 @@ export default function App() {
           >
             Wave A–D &amp; RWA Studio
           </button>
+          <button
+            type="button"
+            data-testid="tab-stealth-studio"
+            onClick={() => setMainTab("stealth")}
+            className={`px-4 py-2 text-xs font-semibold rounded-lg transition-colors ${
+              mainTab === "stealth"
+                ? "bg-gold text-bg font-bold shadow-sm"
+                : "bg-surface text-muted hover:text-fg border border-border"
+            }`}
+          >
+            KVP-103 Stealth Studio
+          </button>
+        </div>
+
+        {/* KVP-103 Stealth Studio */}
+        <div
+          hidden={mainTab !== "stealth"}
+          className={mainTab === "stealth" ? "block" : "hidden"}
+        >
+          <StealthStudio />
         </div>
 
         {/* Wave A-D & RWA Studio */}
