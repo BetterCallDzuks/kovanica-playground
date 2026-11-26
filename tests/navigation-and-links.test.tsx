@@ -287,7 +287,7 @@ describe("Kovanica Playground Navigation, Workspace Sub-Tabs, Presets & Ecosyste
     fireEvent.click(button);
     const out = screen.getByTestId("wave-a-rwa-output").textContent ?? "";
     const parsed = JSON.parse(out);
-    expect(parsed.sdkVersion).toBe("v0.9.0");
+    expect(parsed.sdkVersion).toBe("v0.10.0");
     expect(parsed.passkeyAddressHex).toMatch(/^0x[0-9a-f]{16}\.\.\.$/);
   });
 });

@@ -44,7 +44,7 @@ Kovanica Playground reflects the established Kovanica design system:
    - Aborts in-flight requests when switching methods or endpoints.
    - Instantly clears stale network and mining diagnostics upon endpoint change, and discards delayed in-flight responses from prior endpoints.
 
-5. **Interactive Developer Studios (`kovanica-sdk v0.9.0`):**
+5. **Interactive Developer Studios (`kovanica-sdk v0.10.0`):**
    - **4-Group Wallet & Contracts Workspace:** Reorganized into four persistent sub-tabs with quick-jump tool rails:
      1. **HD Wallet & Signer:** Ephemeral SLIP-0010 HD Wallet, Native Transfer Signing Console, Universal Tx Auto-Decoder & Air-Gap Envelope (`kvnc-tx:v1:`) Studio, and Mempool Fee-Tier Estimator.
      2. **Contracts & Codegen:** Wasmi Contract Call Builder + Multi-Call Batch Estimator + cURL/SDK Code Exporter + JSON Presets, and Typed Contract Facades Studio across all 7 canonical clients (`NameRegistryClient`, `TokenClient`, `EscrowClient`, `HtlcClient`, `NftClient`, `VaultClient`, `MultisigClient`).
@@ -57,18 +57,18 @@ Kovanica Playground reflects the established Kovanica design system:
 
 ## Tested SDK Revision & Immutable Resolution
 
-`kovanica-playground` consumes `kovanica-sdk` at the pinned, immutable git revision [`d1e757d4644583be5e2fca236bf826209f813b1a`](https://github.com/BetterCallDzuks/kovanica-sdk/commit/d1e757d4644583be5e2fca236bf826209f813b1a):
+`kovanica-playground` consumes `kovanica-sdk` at the pinned, immutable git revision [`dbffb2509137d96d898e9edadb90ddc1d7ec6c63`](https://github.com/BetterCallDzuks/kovanica-sdk/commit/dbffb2509137d96d898e9edadb90ddc1d7ec6c63):
 
-- **Manifest Metadata (`package.json`):** Recorded in `kovanicaSdk.testedRevision` (`d1e757d4644583be5e2fca236bf826209f813b1a`) and linked via `"kovanica-sdk": "file:../kovanica-sdk"` in `package.json` and `package-lock.json`.
-- **Automated Verification (`scripts/prepare-sdk.mjs`):** Running `npm run prepare:sdk` (also invoked automatically during `npm run build`) verifies that `../kovanica-sdk` exists, is checked out at the exact pinned 40-character SHA `d1e757d4644583be5e2fca236bf826209f813b1a` (never following a moving `main`), and has compiled `dist/index.js`. If `../kovanica-sdk` is on a different branch or dirty, it materializes the pinned revision into `node_modules/kovanica-sdk` from an isolated worktree without modifying the sibling checkout.
-- **CI Enforcement (`.github/workflows/ci.yml` & `tests/methods.test.ts`):** GitHub Actions explicitly checks out `BetterCallDzuks/kovanica-sdk` at `ref: d1e757d4644583be5e2fca236bf826209f813b1a`, and unit tests assert that `package.json`, `.github/workflows/ci.yml`, and the resolved `node_modules/kovanica-sdk` match this SHA.
+- **Manifest Metadata (`package.json`):** Recorded in `kovanicaSdk.testedRevision` (`dbffb2509137d96d898e9edadb90ddc1d7ec6c63`) and linked via `"kovanica-sdk": "file:../kovanica-sdk"` in `package.json` and `package-lock.json`.
+- **Automated Verification (`scripts/prepare-sdk.mjs`):** Running `npm run prepare:sdk` (also invoked automatically during `npm run build`) verifies that `../kovanica-sdk` exists, is checked out at the exact pinned 40-character SHA `dbffb2509137d96d898e9edadb90ddc1d7ec6c63` (never following a moving `main`), and has compiled `dist/index.js`. If `../kovanica-sdk` is on a different branch or dirty, it materializes the pinned revision into `node_modules/kovanica-sdk` from an isolated worktree without modifying the sibling checkout.
+- **CI Enforcement (`.github/workflows/ci.yml` & `tests/methods.test.ts`):** GitHub Actions explicitly checks out `BetterCallDzuks/kovanica-sdk` at `ref: dbffb2509137d96d898e9edadb90ddc1d7ec6c63`, and unit tests assert that `package.json`, `.github/workflows/ci.yml`, and the resolved `node_modules/kovanica-sdk` match this SHA.
 
 ---
 
 ## Local Integration & Build Workflow
 
 ```bash
-# 1. Verify/clone and build ../kovanica-sdk at pinned SHA d1e757d4644583be5e2fca236bf826209f813b1a
+# 1. Verify/clone and build ../kovanica-sdk at pinned SHA dbffb2509137d96d898e9edadb90ddc1d7ec6c63
 npm run prepare:sdk
 
 # 2. Install playground dependencies cleanly from lockfile
@@ -142,7 +142,7 @@ In CI or isolated environments, the SDK is checked out at the exact pinned revis
 ```bash
 git clone https://github.com/BetterCallDzuks/kovanica-sdk.git
 cd kovanica-sdk
-git checkout d1e757d4644583be5e2fca236bf826209f813b1a
+git checkout dbffb2509137d96d898e9edadb90ddc1d7ec6c63
 npm ci
 npm run build
 
@@ -182,10 +182,10 @@ npm run build
 | Repository | Role |
 | :--- | :--- |
 | **[BetterCallDzuks/kovanica-l1](https://github.com/BetterCallDzuks/kovanica-l1)** | Rust Layer-1 node, Hybrid PoW + GHOSTDAG consensus, Wasmi runtime, RPC, Stratum, Faucet, Indexer, Lightnode & CLI |
-| **[BetterCallDzuks/kovanica-sdk](https://github.com/BetterCallDzuks/kovanica-sdk)** | Official TypeScript SDK (`v0.9.0`) — browser & Node.js client, failover transport, facades, offline codecs, paginated log streamer, air-gap envelopes, Wave A–D / AMM / RWA helpers & WS block+receipt streaming |
+| **[BetterCallDzuks/kovanica-sdk](https://github.com/BetterCallDzuks/kovanica-sdk)** | Official TypeScript SDK (`v0.10.0`) — browser & Node.js client, failover transport, facades, offline codecs, paginated log streamer, air-gap envelopes, Wave A–D / AMM / RWA helpers & WS block+receipt streaming |
 | **[BetterCallDzuks/kovanica-web](https://github.com/BetterCallDzuks/kovanica-web)** | Public site, BlockDAG Explorer, AMM DEX, RWA Portal, Mining Pool, Faucet, API Reference & Pricing (`kovanica.online`) |
 | **[BetterCallDzuks/kovanica-apps](https://github.com/BetterCallDzuks/kovanica-apps)** | Client apps — `wallet-web`, `browser-extension` (MV3), `console-desktop`, `node-desktop`, `desktop`, Android & iOS |
-| **[BetterCallDzuks/kovanica-playground](https://github.com/BetterCallDzuks/kovanica-playground)** | Interactive developer RPC console & `kovanica-sdk v0.9.0` developer studios |
+| **[BetterCallDzuks/kovanica-playground](https://github.com/BetterCallDzuks/kovanica-playground)** | Interactive developer RPC console & `kovanica-sdk v0.10.0` developer studios |
 | **[BetterCallDzuks/Kovanica-Vault](https://github.com/BetterCallDzuks/Kovanica-Vault)** | Interactive Obsidian Vault presentation (Canvases, Bubble Graph, Pitch Deck & Standards Registry) |
 
 ---

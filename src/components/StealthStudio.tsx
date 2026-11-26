@@ -706,7 +706,9 @@ export function StealthStudio() {
                   </div>
                 </>
               ) : (
-                <div className="text-[11px] text-red-300">{scanResult.reason}</div>
+                <div className="text-[11px] text-red-300">
+                  Announcement view tag, ephemeral key, or stealth address did not match this view key.
+                </div>
               )}
             </div>
           )}

@@ -113,7 +113,7 @@ export function WaveARwaStudio() {
     setOutput(
       JSON.stringify(
         {
-          sdkVersion: "v0.9.0",
+          sdkVersion: "v0.10.0",
           batchTxBytes: batch.rawBytes.length,
           batchFeeAtoms: (FIXED_FEE_SCHEDULE.deploy + FIXED_FEE_SCHEDULE.rwa_create).toString(),
           eip1559NextBaseFeeAtFullBlock: nextBase.toString(),
